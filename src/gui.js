@@ -1,0 +1,54 @@
+import GUI from 'lil-gui';
+import { applySpectrumParams } from './ocean/spectrum.js';
+
+// Live control panel. Sea-state changes (wind, amplitude, spread) rebuild the
+// initial spectrum h0 on release; everything else just updates a uniform.
+export function createGUI(params, { ocean, shading, updateSun, spray }) {
+  const gui = new GUI({ title: 'Ocean controls' });
+
+  const recompute = () => {
+    applySpectrumParams(ocean.shared, params);
+    ocean.updateInitialSpectrum();
+  };
+
+  const sea = gui.addFolder('Sea state');
+  sea.add(params.local, 'windSpeed', 0, 30, 0.5).name('wind speed (m/s)').onFinishChange(recompute);
+  sea.add(params.local, 'windDirection', 0, 360, 1).name('wind direction').onFinishChange(recompute);
+  sea.add(params.local, 'scale', 0, 2, 0.02).name('amplitude').onFinishChange(recompute);
+  sea.add(params.local, 'spreadBlend', 0, 1, 0.02).name('directionality').onFinishChange(recompute);
+  sea.add(params, 'lambda', 0, 2.5, 0.02).name('choppiness').onChange((v) => { ocean.lambda.value = v; });
+  sea.add(params, 'timeScale', 0, 3, 0.05).name('time scale');
+
+  const foam = gui.addFolder('Foam');
+  foam.add(params, 'foamThreshold', -0.5, 1.5, 0.02).name('threshold').onChange((v) => { shading.foamThreshold.value = v; });
+  foam.add(params, 'foamScale', 0.2, 8, 0.1).name('coverage').onChange((v) => { shading.foamScale.value = v; });
+  foam.add(params, 'foamDecay', 0.02, 1, 0.01).name('decay (low = lingers)').onChange((v) => { ocean.foamDecay.value = v; });
+
+  const surf = gui.addFolder('Surface');
+  surf.add(params, 'detailStrength', 0, 0.5, 0.01).name('detail noise').onChange((v) => { shading.detail.value = v; });
+  surf.add(params, 'sssStrength', 0, 3, 0.05).name('subsurface').onChange((v) => { shading.sssStrength.value = v; });
+
+  const sky = gui.addFolder('Sun & sky');
+  sky.add(params, 'sunAzimuth', 0, 360, 1).name('sun azimuth').onChange(updateSun);
+  sky.add(params, 'sunElevation', 0, 90, 1).name('sun elevation').onChange(updateSun);
+
+  if (spray) {
+    const sp = gui.addFolder('Spray');
+    sp.add(spray.uniforms.breakThreshold, 'value', 0, 1.2, 0.02).name('break threshold');
+    sp.add(spray.uniforms.emitChance, 'value', 0, 1, 0.02).name('emit rate');
+    sp.add(spray.uniforms.burst, 'value', 0, 14, 0.2).name('burst speed');
+    sp.add(spray.uniforms.size, 'value', 0.1, 3, 0.05).name('droplet size');
+    sp.add(spray.uniforms.opacity, 'value', 0, 1, 0.02).name('opacity');
+    sp.add(spray.uniforms.emitRadius, 'value', 50, 400, 10).name('emit radius');
+  }
+
+  const col = gui.addFolder('Colors').close();
+  const color = (key, uni) => col.addColor(params.colors, key).onChange(() => uni.value.setHex(params.colors[key]));
+  color('deep', shading.deepColor);
+  color('scatter', shading.scatterColor);
+  color('foam', shading.foamColor);
+  color('skyHorizon', shading.horizon);
+  color('skyZenith', shading.zenith);
+
+  return gui;
+}
