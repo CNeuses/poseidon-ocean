@@ -98,10 +98,16 @@ const CHUNK_TILE = 6.5; // chunky cap break-up, at whitecap scale
 // large ones either. Correctly sized holes, far too many of them — which reads
 // as a repeating screen rather than as a raft coming apart.
 //
-// 2.8 m, read mostly through B, delivers ~40 cm fresh and ~65 cm aged: five to
-// six times fewer holes at the same hole-area fraction. Bounded above at about
-// 3.5 m, past which a median whitecap gets one or two holes and reads as a card
-// with bites taken out of it.
+// 2.8 m delivers ~40 cm fresh and ~65 cm aged: five to six times fewer holes at
+// the same hole-area fraction. Bounded above at about 3.5 m, past which a median
+// whitecap gets one or two holes and reads as a card with bites taken out of it.
+//
+// The hole carves now read the CELLULAR channels (R and G) rather than the fbm
+// ones, and the cell counts in detailTexture.js were picked so their delivered
+// feature size matches the fbm pair they replaced — 0.18 and 0.078 of a tile
+// against 0.176 and 0.088. So this constant still means what it says, and the
+// sizes above are unchanged by the swap. What changed is the ARRANGEMENT: see
+// the `cells` carve below.
 const CELL_TILE = 2.8;
 // ...and the two decorrelation defences have to scale WITH the tile, or they
 // weaken by exactly the factor that makes the features more visible. Both are
@@ -527,7 +533,20 @@ export function foamShading(ctx) {
   // variance falls 19%, which shallows the low tail, and the low tail is what
   // punches the holes. If contrast reads short, widen the erode window rather
   // than moving weight back onto A, which would undo the change.
-  const cells = saturate(cellN.a.mul(0.95).add(cellN.b.mul(1.00)).add(sB.b.mul(0.6)).sub(0.45)).toVar();
+  // R and G, not B and A: the two cellular channels — see detailTexture.js.
+  // Every carve that PUNCHES HOLES now reads them, and the ones that shape
+  // silhouettes or stretch into streaks keep the fbm. The reason is spectral. An
+  // fbm carries energy at every scale, so whole regions of it sit low and the
+  // holes a threshold cuts inside those regions pile up — measured, its
+  // autocorrelation is still 0.414 at a tenth of a tile and the block dispersion
+  // of below-threshold pixels is 521. That clustering is what reads as clumpy,
+  // and it is a property of the spectrum, so no tile size fixes it. A cellular
+  // field has one feature per cell and cannot pile up: 0.117 and 303 at the
+  // baked settings. The weights are unchanged, and so are CARVE_CHUNK,
+  // CARVE_STREAK and CARVE_WEB, because the bake renormalises both families onto
+  // the same mean and std and their CDFs agree within a point and a half at
+  // every threshold this file cuts at.
+  const cells = saturate(cellN.g.mul(0.95).add(cellN.r.mul(1.00)).add(sB.b.mul(0.6)).sub(0.45)).toVar();
   // The streak tile crossfades to a longer aspect with age — see STREAK_LONG_OLD.
   const sMix = mix(sA, sAold, aged).toVar();
   const streak = sMix.b.mul(1.25).add(sMix.a.mul(0.6)).add(sB.a.mul(0.8)).sub(0.15)
@@ -536,7 +555,7 @@ export function foamShading(ctx) {
     .mul(mix(float(1.0), cells, float(0.70))).toVar();
   // The lacy carve mixes three frequencies *and* two anisotropies on purpose.
   // One dominant frequency at a threshold is a halftone screen.
-  const web = cellN.a.mul(0.55).add(cellN.b.mul(0.70)).add(sB.a.mul(0.55)).add(sA.b.mul(0.45)).sub(0.25).toVar();
+  const web = cellN.g.mul(0.55).add(cellN.r.mul(0.70)).add(sB.a.mul(0.55)).add(sA.b.mul(0.45)).sub(0.25).toVar();
 
   // --- where foam is allowed to live ---------------------------------------
   // The height itself is JITTERED before any ramp, and that is not a detail. A
@@ -728,15 +747,19 @@ export function foamShading(ctx) {
     float(CELL_TILE).mul(aged.mul(HOLE_GROW).add(1.27)),
   )).toVar();
   // Four terms across three scales and two frames, and a window wide enough not
-  // to trace any one of their lattices. detailTexture bakes value noise with a
-  // smoothstep interpolant, so its iso-contours bunch along the lattice edges
-  // and a steep enough threshold on any single tap draws that lattice as a grid.
-  // The old constant 0.14 floor made this a 7:1 swing and it never showed; the
-  // age-driven floor below takes it to nearly 7:1 again at HOLE_FLOOR_OLD, which
-  // is deliberately not the 25:1 it was first set to.
+  // to trace any one of their lattices. Three of the four taps are now cellular
+  // (see `cells` above), which removes the specific failure this window was
+  // widened for: the fbm channels are value noise on a square lattice with a
+  // smoothstep interpolant, whose gradient is zero at every lattice point, so
+  // its iso-contours bunch on the lattice edges and a steep enough threshold
+  // prints them as a grid. A cellular field's structure is radial around its
+  // feature points and has no such preferred direction. The window stays wide
+  // anyway because the fourth tap is still fbm and because HOLE_FLOOR_OLD makes
+  // this a ~7:1 swing on aged foam — deliberately not the 25:1 it was first set
+  // to, which is what printed a burlap weave across every foreground raft.
   const erode = smoothstep(float(0.10), float(0.62), saturate(
-    eCell.a.mul(0.70).add(eCell.b.mul(0.90))
-      .add(chunkN.b.mul(0.80)).add(cellN.a.mul(0.70)).sub(0.79),
+    eCell.g.mul(0.70).add(eCell.r.mul(0.90))
+      .add(chunkN.b.mul(0.80)).add(cellN.g.mul(0.70)).sub(0.79),
   )).toVar();
   const holeFloor = mix(float(HOLE_FLOOR_NEW), float(HOLE_FLOOR_OLD), aged).toVar();
   const coverage = raw.mul(mix(holeFloor, float(1.0), erode)).toVar();
