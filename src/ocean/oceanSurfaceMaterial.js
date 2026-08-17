@@ -408,6 +408,29 @@ const SAT_BOOST = 1.12;
 // draws the glitter path, and accumulated-Jacobian foam whitens breaking crests.
 // A baked tiling noise texture, differenced for its gradient, adds capillary
 // ripple below the finest cascade.
+// --- bubble plume ----------------------------------------------------------
+// Foam does not fade into water. It fades into a milky, brighter, greener patch
+// of water that extends BEYOND the visible foam and outlives it: a breaking
+// crest injects a plume of bubbles metres deep, 50-100 um bubbles dominate the
+// backscatter, and radiometers see the plume where a photograph shows no
+// whitecap at all. Rendering the foam mask alone and letting it fade to nothing
+// is most of why a dying whitecap here reads as an arbitrary dissolve rather
+// than as a process finishing.
+//
+// Read from cascade 0's lace channel at a deliberately coarse mip, so the halo
+// is wider and softer than the foam drawn on top of it. The colour is bubble
+// backscatter — spectrally flat — times the round-trip absorption of about a
+// metre of water at a = (0.34, 0.057, 0.009) 1/m, which is what turns a white
+// scatterer into the pale green a whitecap's wake actually is.
+//
+// ADDED to the body, never lerped into it: a lerp would replace the water and
+// read as fog lying on the surface. And kept small — this is the only foam term
+// with no threshold, no group mask and no opacity ceiling, so it is the one that
+// can quietly turn the whole sea to milk.
+const PLUME_RADIUS = 8.0; // m of lateral spread, as a mip level below
+const PLUME_COLOR = vec3(0.62, 0.92, 0.99);
+const PLUME_GAIN = 0.15;
+
 export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, detailTex }) {
   const mat = new MeshBasicNodeMaterial();
   // Plane is authored in XY and remapped to XZ in positionNode, flipping the
@@ -872,7 +895,18 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // the glow at exactly the wrong moment; exact Fresnel is 0.31 there, so
     // there is nothing left to compensate for. The floor goes with it — REFL_CEIL
     // already guarantees the sea keeps 14% of its own colour in the mix.
-    const water = mix(body.add(glow), refl, fres).toVar();
+    // Bubble plume under and around a break — see PLUME_RADIUS. On the
+    // transmitted side of the Fresnel split with the rest of the water, because
+    // that is where it physically is: light scattered back out of the water
+    // column, not off the surface.
+    const plume = vec3(0).toVar();
+    if (cascades[0]?.foamMap) {
+      const texelM = lengthScales[0] / cascades[0].N;
+      const lodP = log2(footprint.div(texelM)).max(float(Math.log2(Math.max(PLUME_RADIUS / texelM, 1))));
+      const pl = texture(cascades[0].foamMap, worldXZ.div(lengthScales[0])).level(lodP).z;
+      plume.assign(PLUME_COLOR.mul(pl.mul(PLUME_GAIN)));
+    }
+    const water = mix(body.add(glow).add(plume), refl, fres).toVar();
     // A deliberate chroma push, on the water and nothing else — see SAT_BOOST.
     // It sits here rather than on the finished pixel because foam and glitter
     // are white by intent, and extrapolating a white away from its own luminance

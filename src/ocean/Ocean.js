@@ -1,4 +1,6 @@
+import { Vector2 } from 'three/webgpu';
 import { uniform, attributeArray } from 'three/tsl';
+import { foamHeading } from './params.js';
 import { createSharedSpectrumUniforms, applySpectrumParams } from './spectrum.js';
 import { gaussianNoise } from './gaussianNoise.js';
 import { OceanCascade } from './OceanCascade.js';
@@ -12,11 +14,15 @@ const FIELD_NAMES = ['DxDz', 'DyDxz', 'DyxDyz', 'DxxDzz'];
 // map assembly are wired in by later steps; step 2 stops at the time-dependent
 // spectra (still in the frequency domain).
 export class Ocean {
-  constructor(renderer, params) {
+  constructor(renderer, params, { detailTex } = {}) {
     this.renderer = renderer;
     this.params = params;
     this.N = params.N;
     this.time = uniform(0);
+    // One source of truth for the foam anisotropy axis — see foamHeading().
+    // maps.js drifts the break stencil along it and foamShading.js builds every
+    // stretched tile, tail tap and lean test on it, so it cannot be two values.
+    this.foamHeading = uniform(new Vector2(...foamHeading(params)));
 
     this.shared = createSharedSpectrumUniforms();
     applySpectrumParams(this.shared, params);
@@ -67,7 +73,15 @@ export class Ocean {
     this.foamDecay = uniform(params.foamDecay);
     this.assembleGroup = [];
     for (const c of this.cascades) {
-      const maps = createCascadeMaps(c, { N: this.N, lambda: this.lambda, dt: this.dt, foamDecay: this.foamDecay });
+      const maps = createCascadeMaps(c, {
+        N: this.N,
+        lambda: this.lambda,
+        dt: this.dt,
+        foamDecay: this.foamDecay,
+        detailTex,
+        time: this.time,
+        heading: this.foamHeading,
+      });
       c.displacement = maps.displacement;
       c.derivatives = maps.derivatives;
       this.assembleGroup.push(maps.assemble);

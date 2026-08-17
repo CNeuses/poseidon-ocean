@@ -1,5 +1,6 @@
 import GUI from 'lil-gui';
 import { applySpectrumParams } from './ocean/spectrum.js';
+import { foamHeading } from './ocean/params.js';
 
 // Live control panel. Sea-state changes (wind, amplitude, spread) rebuild the
 // initial spectrum h0 on release; everything else just updates a uniform.
@@ -8,6 +9,10 @@ export function createGUI(params, { ocean, shading, updateSun }) {
 
   const recompute = () => {
     applySpectrumParams(ocean.shared, params);
+    // ...and the foam anisotropy axis, which is derived from both trains'
+    // headings. Miss this and every streak in the render points the wrong way
+    // the moment the wind slider moves.
+    ocean.foamHeading.value.set(...foamHeading(params));
     ocean.updateInitialSpectrum();
   };
 

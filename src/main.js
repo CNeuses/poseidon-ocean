@@ -124,13 +124,18 @@ async function main() {
   // distance haze — the far ocean fades into the exact sky value behind it
   scene.fogNode = createAerialPerspective(shading);
 
+  // The baked fbm is now needed by the simulation as well as the surface — the
+  // break stencil in maps.js samples it — so it has to exist before the Ocean.
+  const detailTex = makeDetailTexture();
+
   // FFT-ocean simulation
-  const ocean = new Ocean(renderer, params);
+  const ocean = new Ocean(renderer, params, { detailTex });
   await ocean.updateInitialSpectrum();
+  // the sim owns the foam anisotropy axis; the surface shader reads the same one
+  shading.foamHeading = ocean.foamHeading;
 
   // shaded ocean surface — ~790k-vert radial grid recentred on the camera, dense
   // underfoot and sparse out at 20 km so the water runs to a real horizon
-  const detailTex = makeDetailTexture();
   const oceanSurfaceMat = createOceanSurfaceMaterial(ocean.cascades, { lengthScales: params.lengthScales, shading, detailTex });
   const grid = createRadialGrid({ rings: 620, sectors: 1280, spacing: 0.35, soften: 41 });
   const OCEAN_CELL = grid.innerSpacing; // snap the grid's origin to its own finest step

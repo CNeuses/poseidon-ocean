@@ -305,3 +305,30 @@ export const params = {
   // --- detail ---
   detailStrength: 0.1, // sub-grid normal-noise amount (breaks up uniformity)
 };
+
+// The direction foam is anisotropic along: streak axis, tail dilation, event
+// stencil drift. Every one of those wants the heading of the waves that are
+// actually BREAKING, which is not the same as the heading of the biggest waves.
+//
+// Breaking follows steepness, not height variance. The measured RMS slopes
+// recorded above are 0.081 in the 100-200 m band, 0.106 in 50-100 m and 0.114
+// in 25-50 m; through the choppiness knee those weight to roughly 0.081 of fold
+// contribution from the swell train and 0.195 from the wind sea and its chop.
+// So the swell carries most of the HEIGHT and less than a third of the folding,
+// and a heading weighted by fold lands near 36 degrees rather than on either
+// train — which is also why trails legitimately run at two visibly different
+// angles in the same frame.
+//
+// This used to be a module constant (FLOW_DEG = 45) in foamShading.js while
+// windDirection was a live GUI slider, so every anisotropy in the file silently
+// desynced from the sea the moment the wind was touched.
+const FOLD_W_LOCAL = 0.195;
+const FOLD_W_SWELL = 0.081;
+export function foamHeading(p) {
+  const a = (p.local.windDirection * Math.PI) / 180;
+  const b = (p.swell.windDirection * Math.PI) / 180;
+  const x = Math.cos(a) * FOLD_W_LOCAL + Math.cos(b) * FOLD_W_SWELL;
+  const z = Math.sin(a) * FOLD_W_LOCAL + Math.sin(b) * FOLD_W_SWELL;
+  const m = Math.hypot(x, z) || 1;
+  return [x / m, z / m];
+}
