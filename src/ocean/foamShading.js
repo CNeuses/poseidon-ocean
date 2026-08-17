@@ -146,6 +146,38 @@ const WANDER = 4.0;
 // drawn mask carves holes in a continuous raft and gives a dashed cornice,
 // whereas segmenting the event gives separate patches that each sweep their own
 // fully formed trail.
+// Whitecap-scale scatter — see the `scatter` carve. The tile sets the DENSITY
+// of whitecaps and the thresholds set their SIZE, which is the pair of knobs an
+// fbm can never give you separately. The coarse cellular channel's feature is
+// 0.18 x tile, so 18 m draws discs about 3.3 m across on a 18 m lattice: inside
+// the 1-15 m breaking-segment range, and small enough to cut the 20-40 m masses
+// the event stencil paints into separate whitecaps.
+//
+// SCATTER_LO/HI are in the baked field's own units, N(0.4089, 0.1328). Passing
+// at r < ~0.36 keeps roughly a third of the lattice, so foam comes out as
+// scattered discs rather than a sheet; the event stencil in maps.js is opened to
+// compensate for the area that costs, because rationing at whitecap scale is
+// physically the right place to do it and rationing at 24 m was not.
+// Sampled ANISOTROPICALLY, in the heading frame, and that is not a refinement —
+// it is the difference between whitecaps and coins. A cellular field thresholded
+// isotropically gives round discs on a jittered lattice, and a round disc is the
+// single most artificial shape foam can take: a real whitecap is a segment of a
+// breaking crest, so it is elongated ALONG the crest line and short along the
+// direction of travel, typically 2:1 to 5:1. Long across, short along.
+const SCATTER_ALONG = 28.0; // m of tile along the heading  -> ~5.0 m of feature
+const SCATTER_ACROSS = 76.0; // m across it, i.e. along the crest -> ~13.7 m
+// ...and domain-warped before it is sampled, for the same reason every other
+// tiled carve in this file is. One feature per cell makes a cellular field
+// MORE regular than random — which is what kills the clumping, and is also
+// exactly what reads as an evenly spaced array once the cells are large enough
+// to see. The warp has to be comparable to the cell spacing to break that up,
+// not a fraction of it.
+const SCATTER_WARP_TILE = 65.0; // m — coarser than the scatter it displaces
+const SCATTER_WARP = 7.0; // m of displacement (1 sigma), against ~6 m of spacing
+const SCATTER_LO = 0.32;
+const SCATTER_HI = 0.50;
+const SCATTER_FLOOR = 0.26;
+const SCATTER_DRIFT = 1.1; // m/s along the heading, so it is not a fixed stencil
 const GAP_A_LONG = 300;
 const GAP_A_WIDE = 48;
 const GAP_B_LONG = 1000;
@@ -623,13 +655,56 @@ export function foamShading(ctx) {
     .mul(saturate(gapB.b.mul(2.5).sub(0.45))).toVar();
   const patchG = mix(float(0.70), float(1.0), patch).toVar();
 
-  const capA = cap.mul(mix(float(0.05), float(1.0), capVeto))
+  // --- scatter: the carve that makes whitecaps SEPARATE objects -------------
+  // Measured on the coverage field with tools/foamblobs.mjs: 67% of all foam on
+  // screen lived in FIVE connected components, and only twenty components in the
+  // whole frame were bigger than 500 px. The rest was two-pixel dust. A real
+  // whitecap field is hundreds of separate patches with a broad size
+  // distribution; this was a handful of continents.
+  //
+  // The cause was a hole in the scale ladder. Isotropic separating structure
+  // existed at 0.50 m (`cells`) and 1.24 m (`chunk`), then jumped to 9-57 m
+  // (gapA/gapB) — and those are deliberately weak, mix(0.70, 1.0), because their
+  // job is to vary foam rather than ration it. Nothing at all acted between
+  // 1.2 m and 9 m, which is exactly whitecap scale: Callaghan's median foam
+  // patch is 1.5 m^2, about 1.4 m across, and the Lambda(c) breaking-segment
+  // range is 1-15 m. So the field could get surface texture and wave-group
+  // variation, but nothing could ever cut one connected mass into two whitecaps.
+  //
+  // This is what a cellular field is actually for, and it is where the cellular
+  // channels earn their place: F1 is LOW near each feature point, so gating on
+  // low F1 leaves a disc per cell — discrete, separated, one per cell by
+  // construction, at a density set by the cell count and a size set by the
+  // threshold, with the baked lognormal radius giving them a size spread. Used
+  // for holes at sub-metre scale it did nothing measurable, because at these
+  // viewing distances it was already mipping to its mean.
+  //
+  // It DRIFTS along the heading, for the same reason the injection stencil in
+  // maps.js does: a static world-space scatter is a permanent stencil, and the
+  // sea would break in the same places forever.
+  const scatW = texture(detailTex, worldXZ.div(SCATTER_WARP_TILE)).toVar();
+  const scatOff = vec2(scatW.b.sub(0.41), scatW.a.sub(0.41)).mul(SCATTER_WARP / 0.1328).toVar();
+  const scatXZ = worldXZ.add(scatOff).add(vec2(HX, HZ).mul(t.mul(SCATTER_DRIFT))).toVar();
+  const scatN = texture(detailTex, vec2(
+    scatXZ.x.mul(HX).add(scatXZ.y.mul(HZ)).div(SCATTER_ALONG),
+    scatXZ.x.mul(HZ.negate()).add(scatXZ.y.mul(HX)).div(SCATTER_ACROSS),
+  )).toVar();
+  // Reversed smoothstep: high where the cellular field is low, i.e. inside a
+  // disc. Floored rather than closing to zero — this decides where whitecaps
+  // are, and a hard zero would delete the aged foam that has drifted off the
+  // patch that made it.
+  const scatter = mix(
+    float(SCATTER_FLOOR), float(1.0),
+    smoothstep(float(SCATTER_HI), float(SCATTER_LO), scatN.r),
+  ).toVar();
+
+  const capA = cap.mul(scatter).mul(mix(float(0.05), float(1.0), capVeto))
     .mul(mix(float(0.03), float(1.0), face))
     .mul(mix(float(0.30), float(1.0), lip))
     .mul(patchG).toVar();
-  const trailA = trail.mul(mix(float(0.35), float(1.0), trailH))
+  const trailA = trail.mul(scatter).mul(mix(float(0.35), float(1.0), trailH))
     .mul(patchG).mul(conc).toVar();
-  const laceA = lace.mul(patchG).mul(conc).toVar();
+  const laceA = lace.mul(scatter).mul(patchG).mul(conc).toVar();
 
   // --- coverage -------------------------------------------------------------
   const capM = capA.mul(chunk).mul(CAP_NORM).toVar();

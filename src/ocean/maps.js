@@ -100,8 +100,16 @@ const EVT_WIDE = 32; // m across it — the fbm's coarsest octave is a quarter o
 // factor of ~4 over the field measurements is deliberate: this is an art target,
 // and Kleiss & Melville's own caveat is that a single-threshold photographic W
 // undercounts dim Stage B foam by close to an order of magnitude anyway.
-const EVT_LO = 0.495;
-const EVT_HI = 0.605;
+// Opened from +0.65/+1.48 sigma, and the reason is that the RATION MOVED. This
+// stencil segments at roughly 6 x 24 m, and measured with tools/foamblobs.mjs
+// that left 67% of all foam on screen inside five connected components — the
+// events were large enough that neighbours merged into continents. foamShading
+// now carries a whitecap-scale scatter at about 3.3 m, which is where Lambda(c)
+// says breaking segments actually live, so that is where the sea's foam budget
+// should be spent. This term goes back to deciding only WHERE a stretch of crest
+// is eligible, and hands the "how much" job downstream.
+const EVT_LO = 0.430;
+const EVT_HI = 0.540;
 const EVT_DRIFT = 4.5; // m/s, ~c/2 for the 40-100 m band that actually folds
 
 // Foam age, in seconds since this water particle was last inside a break. This
