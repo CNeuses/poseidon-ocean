@@ -3,3 +3,6 @@ dist/
 .vite/
 *.log
 .DS_Store
+
+# 2 GB of review captures — regenerate with tools/shot.mjs
+shots/

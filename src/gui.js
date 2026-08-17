@@ -3,7 +3,7 @@ import { applySpectrumParams } from './ocean/spectrum.js';
 
 // Live control panel. Sea-state changes (wind, amplitude, spread) rebuild the
 // initial spectrum h0 on release; everything else just updates a uniform.
-export function createGUI(params, { ocean, shading, updateSun, spray }) {
+export function createGUI(params, { ocean, shading, updateSun }) {
   const gui = new GUI({ title: 'Ocean controls' });
 
   const recompute = () => {
@@ -31,16 +31,7 @@ export function createGUI(params, { ocean, shading, updateSun, spray }) {
   const sky = gui.addFolder('Sun & sky');
   sky.add(params, 'sunAzimuth', 0, 360, 1).name('sun azimuth').onChange(updateSun);
   sky.add(params, 'sunElevation', 0, 90, 1).name('sun elevation').onChange(updateSun);
-
-  if (spray) {
-    const sp = gui.addFolder('Spray');
-    sp.add(spray.uniforms.breakThreshold, 'value', 0, 1.2, 0.02).name('break threshold');
-    sp.add(spray.uniforms.emitChance, 'value', 0, 1, 0.02).name('emit rate');
-    sp.add(spray.uniforms.burst, 'value', 0, 14, 0.2).name('burst speed');
-    sp.add(spray.uniforms.size, 'value', 0.1, 3, 0.05).name('droplet size');
-    sp.add(spray.uniforms.opacity, 'value', 0, 1, 0.02).name('opacity');
-    sp.add(spray.uniforms.emitRadius, 'value', 50, 400, 10).name('emit radius');
-  }
+  sky.add(params, 'sunIntensity', 0, 8, 0.05).name('sun intensity').onChange(updateSun);
 
   const col = gui.addFolder('Colors').close();
   const color = (key, uni) => col.addColor(params.colors, key).onChange(() => uni.value.setHex(params.colors[key]));
@@ -49,6 +40,9 @@ export function createGUI(params, { ocean, shading, updateSun, spray }) {
   color('foam', shading.foamColor);
   color('skyHorizon', shading.horizon);
   color('skyZenith', shading.zenith);
+  // sun is not a swatch the material reads directly — it is multiplied by
+  // sunIntensity into a radiance, so it goes back through updateSun()
+  col.addColor(params.colors, 'sun').name('sun (match the sky)').onChange(updateSun);
 
   return gui;
 }

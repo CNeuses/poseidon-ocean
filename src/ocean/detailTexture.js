@@ -7,7 +7,29 @@ import {
 //   RG = detail normal perturbation (encoded *0.5+0.5)
 //   B  = low-frequency value (foam break-up / variation)
 //   A  = higher-frequency value
-export function makeDetailTexture(size = 512, octaves = 3) {
+// Statistics of the field as it was originally baked (3 octaves, persistence
+// 0.5), measured over the whole tile. Every carve constant in foamShading.js is
+// tuned against these — the `sub(0.44)` and `sub(0.45)` biases scattered through
+// that file are all sitting near this mean — so the field is renormalised back
+// onto them below. That is what makes the octave count and the persistence FREE
+// PARAMETERS: change the spectrum, keep the statistics, and nothing downstream
+// has to be retuned.
+const TARGET_MEAN = 0.4089;
+const TARGET_STD = 0.1328;
+
+// More octaves, and a flatter falloff than the classic 0.5. Both are aimed at
+// one artifact: with three octaves at half amplitude the coarsest one carries
+// 57% of the variance, so the field has essentially ONE feature size, and every
+// carve built on it punches holes of that same size. A magnified capture of a
+// whitecap showed exactly that — a raft of near-identical comma-shaped holes at
+// near-identical spacing, which reads as one brush stamped repeatedly. At 0.68
+// the third and fourth octaves still carry real weight, so holes come in a
+// range of sizes and the raft stops looking printed.
+//
+// Five octaves and not six: the finest lands at 8 texels per feature on a 512
+// tile, which the mip chain can still filter honestly. At six it is 4 texels and
+// the bake is aliasing before the GPU ever sees it.
+export function makeDetailTexture(size = 512, octaves = 5, persistence = 0.68) {
   const rand = new Float32Array(size * size);
   let seed = 1234567;
   const rng = () => {
@@ -34,17 +56,34 @@ export function makeDetailTexture(size = 512, octaves = 3) {
     return a * (1 - uu) * (1 - vv) + b * uu * (1 - vv) + c * (1 - uu) * vv + d * uu * vv;
   };
 
-  const fbm = (u, v) => {
+  const raw = (u, v) => {
     let s = 0;
     let amp = 0.5;
     let f = 4;
     for (let o = 0; o < octaves; o++) {
       s += amp * octave(u, v, f);
-      amp *= 0.5;
+      amp *= persistence;
       f *= 2;
     }
     return s;
   };
+
+  // Renormalise onto TARGET_MEAN / TARGET_STD — see above. Measured on a coarse
+  // stride rather than every texel: this is estimating two moments of a smooth
+  // field, and a quarter of the samples gets them to more decimal places than
+  // anything downstream can tell apart, for a sixteenth of the bake cost.
+  let n = 0;
+  let sum = 0;
+  let sum2 = 0;
+  for (let y = 0; y < size; y += 4) {
+    for (let x = 0; x < size; x += 4) {
+      const h = raw(x / size, y / size);
+      n++; sum += h; sum2 += h * h;
+    }
+  }
+  const mean = sum / n;
+  const gain = TARGET_STD / Math.sqrt(Math.max(sum2 / n - mean * mean, 1e-9));
+  const fbm = (u, v) => (raw(u, v) - mean) * gain + TARGET_MEAN;
 
   const clamp255 = (x) => Math.max(0, Math.min(255, Math.round(x)));
   const data = new Uint8Array(size * size * 4);
