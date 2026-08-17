@@ -80,8 +80,34 @@ const STREAK_WIDE2 = 1.0;
 // world origin.
 const STREAK_LONG_OLD = 75;
 const CHUNK_TILE = 6.5; // chunky cap break-up, at whitecap scale
-const CELL_TILE = 1.7; // bubble-cell holes — what stops the cap being a sheet
-const CELL_WARP = 1.3; // m the cell tile is dragged around by the chunk tap
+// Bubble-cell holes — what stops the cap being a sheet.
+//
+// A TILE IS NOT A FEATURE. The baked field's octave variance shares are
+// 55/25/12/5/2%, so it is dominated by its coarsest octave, and its radial
+// autocorrelation reaches half height at 0.095 of a tile. Stating that as
+// feature DIAMETER, which is what the eye reads:
+//
+//     B channel: feature ~= 0.19 x tile.   A channel: ~= 0.095 x tile.
+//
+// (A is the same field at twice the frequency — detailTexture.js:102.) So a
+// 1.7 m tile read mostly through A was delivering holes about SIXTEEN
+// CENTIMETRES across, and the comments in this file that described it as
+// metre-scale were out by a factor of ten. That is the whole of "the foam
+// texture is too concentrated": ~45 pits inside a median 1.4 m whitecap, all
+// the same size, in a field with negative kurtosis so there is no tail of rare
+// large ones either. Correctly sized holes, far too many of them — which reads
+// as a repeating screen rather than as a raft coming apart.
+//
+// 2.8 m, read mostly through B, delivers ~40 cm fresh and ~65 cm aged: five to
+// six times fewer holes at the same hole-area fraction. Bounded above at about
+// 3.5 m, past which a median whitecap gets one or two holes and reads as a card
+// with bites taken out of it.
+const CELL_TILE = 2.8;
+// ...and the two decorrelation defences have to scale WITH the tile, or they
+// weaken by exactly the factor that makes the features more visible. Both are
+// pure translations of the sampling frame, so neither moves a mean, a variance
+// or a spectrum, and no constant downstream has to follow.
+const CELL_WARP = 2.15; // m — holds the warp at 0.77 tiles
 // The whole fine-detail frame wanders by up to a couple of metres over a tile
 // this long. Every carve below repeats at ITS OWN tile size — the cells every
 // 1.7 m, the chunk every 6.5 m — and at deck range those are large on screen and
@@ -98,7 +124,9 @@ const CELL_WARP = 1.3; // m the cell tile is dragged around by the chunk tap
 // see. It is also, deliberately, not applied to the group masks — those ARE
 // meant to be a fixed geometry of where foam may live.
 const WANDER_TILE = 137;
-const WANDER = 2.4; // m
+// Multiplies a channel whose sigma is 0.1328, so this is 0.53 m of actual
+// offset, not 4 m — scaled with CELL_TILE to hold it at ~0.19 tiles.
+const WANDER = 4.0;
 // Wave-group scale, and the other way round: features hundreds of metres long
 // down the wave and tens of metres apart ALONG the crest. Two tiles at a
 // deliberately non-harmonic ratio, multiplied rather than maxed: one group
@@ -179,7 +207,17 @@ const SKY_VIS_MIN = 0.70;
 // threshold is gone and coverage is read linearly. It is not a fade-out: a sea
 // that is 14% foam should render 14% foam, and at the horizon that is a faint
 // wash rather than the hard bar a threshold prints.
-const FAR_FOOT = 2.4;
+// ...and it starts at an ONSET rather than at zero footprint, which the old
+// single-constant form got wrong in a way that mattered. `lod` for the foam map
+// is log2(footprint / 4.0).max(0), so below a 4 m footprint the tap is plain
+// bilinear at full sharpness and the mip has averaged nothing at all — the claim
+// that the map is "fully band-limited and returning the local area fraction"
+// was false everywhere in 0 < footprint < 4 m. At FAR_FOOT 2.4 measured from
+// zero, `far` was already 0.42 at a one-metre footprint, so most of the visible
+// mid-field was being drawn by the unthresholded linear branch, which is
+// inherently soft. That is half of why residual foam read as an airbrush.
+const FAR_ONSET = 2.0; // m of footprint before the linear read starts to mix in
+const FAR_SPAN = 2.0; // ...and over which it takes over completely
 const FAR_GAIN = 1.7; // ...compensating for the carves having gone to their means
 const FAR_CEIL = 0.60; // and a ceiling, so a grazing view is caps on blue, never a sheet
 // The blunt second distance ramp that used to sit alongside this — a straight
@@ -196,6 +234,15 @@ const FAR_CEIL = 0.60; // and a ceiling, so a grazing view is caps on blue, neve
 const OP_CAP = 0.75;
 const OP_TRAIL = 0.50;
 const OP_LACE = 0.25;
+// Ceiling on the OVER composite, which is a different number from OP_CAP and
+// was wrong to share it. With trail at 0.50 and lace at 0.25 the composite base
+// is already 0.625, so clamping the sum at 0.75 started clipping once capC
+// reached 0.333 — 44% of its own ceiling — and since most of a cap's interior
+// is saturated anyway, the whole cap-over-trail region came out as one flat
+// alpha. That is a lozenge in VALUE as well as in outline. 0.90 is what the
+// file's own albedo argument allows: 0.90*0.55 + 0.10*0.05 = 0.50, the top of
+// the measured 0.40-0.50 composite reflectance band for a fresh raft.
+const COMPOSITE_MAX = 0.90;
 
 // Each regime's mask is normalised to a nominal peak of 1 so the one GUI
 // threshold means the same thing to all three. The rule is the reciprocal of
@@ -223,7 +270,13 @@ const LACE_NORM = 1 / (FOAM_PEAK.lace * GATE_LACE * CARVE_WEB);
 // working value is scaled here — the GUI slider still bites, the default just
 // lands where the normalised masks above actually live.
 const THRESH_SCALE = 1.10;
-const EDGE_CAP = 0.55; // edge width, in units of 1/foamScale
+// Per-regime threshold PLACEMENT, in units of 1/foamScale. These used to be
+// edge WIDTHS; the width now comes from the pixel footprint instead (see the
+// cut() below). The values are unchanged because placing the threshold at the
+// old window's midpoint is area-neutral by construction — at the default
+// foamScale of 2.5 they put the crossings at 0.55 / 0.61 / 0.70 against a base
+// T of 0.44, which is where the old ramps were half open.
+const EDGE_CAP = 0.55;
 const EDGE_TRAIL = 0.85;
 const EDGE_LACE = 1.30;
 
@@ -247,6 +300,10 @@ const LIP_DEPTH = 0.15;
 // neighbourhood. These reach across the 23 m band the sim now writes.
 const TAIL_D = [0.0, 4.0, 9.0, 15.0];
 const TAIL_W = [1.0, 0.78, 0.58, 0.36];
+// Metres of lateral shear per tap index — see the loop. Tap 3 picks up ~0.75 m,
+// which is enough to make the dilation's structuring element a curve and small
+// enough that the taps stay in order.
+const TAIL_SHEAR = 0.25;
 
 // Per-cascade weight on the cap. The cascades are a band split: cascade 0
 // carries the swell and the 24-1024 m waves — including the whole 40-100 m band
@@ -270,7 +327,7 @@ const CASCADE_W = [1.0, 0.32];
 //          rupture, so the holes OPEN with age. The floor runs from 1.0 (no
 //          holes) to 0.04 (nearly to water) rather than sitting at a constant
 //          0.14, which was not a hole at all but a 14%-opacity dimple.
-//   SIZE   and they GROW, 1.7 m to ~4.4 m, because a patch fragments — field
+//   SIZE   and they GROW, about 40 cm to 65 cm, because a patch fragments — field
 //          work on individual breakers needs a metre of dilation to reconnect
 //          one whitecap's foam pixels late in its life. This is film rupture and
 //          patch break-up, not bubble coarsening, which acts on a 0.1-1 mm
@@ -294,7 +351,8 @@ const HOLE_FLOOR_NEW = 1.0; // a fresh Stage-A cap has no through-holes at all
 // could never express — and 25:1 of contrast on a baked value-noise field is
 // enough to print the texture's own lattice. See the erosion block below.
 const HOLE_FLOOR_OLD = 0.15;
-// Cell tile multiplier at full age: 1.7 m fresh to 2.6 m old. The size matters
+// Cell tile multiplier at full age: 2.8 m fresh to 5.1 m of tile old, which is
+// ~40 cm of feature fresh and ~65 cm aged — see CELL_TILE. The ratio matters
 // far less than the RATIO — see the erosion block below. At 1.6 (4.4 m) and at
 // 1.0 (3.4 m) the aged tile landed within a few percent of half CHUNK_TILE, and
 // two value-noise lattices an octave apart reinforce instead of interfering.
@@ -319,7 +377,7 @@ export function foamShading(ctx) {
 
   // world size of this pixel — the same band-limit the surface normal uses
   const footprint = max(fwidth(worldXZ.x), fwidth(worldXZ.y)).max(1e-3).toVar();
-  const far = saturate(footprint.div(FAR_FOOT)).toVar();
+  const far = saturate(footprint.sub(FAR_ONSET).div(FAR_SPAN)).toVar();
 
   // --- break-up noise -------------------------------------------------------
   // Everything anisotropic is sampled in a frame aligned to the wave's heading,
@@ -406,7 +464,16 @@ export function foamShading(ctx) {
     ageV.assign(f.w);
 
     for (let k = 1; k < TAIL_D.length; k++) {
-      const off = vec2(HX.mul(TAIL_D[k] / L), HZ.mul(TAIL_D[k] / L));
+      // Sheared, not collinear. max() over taps offset along ONE axis is a
+      // grayscale dilation by a line segment: it fills every boundary concavity
+      // narrower than the tap spacing unconditionally, and that — plus a
+      // monotone weight taper — is a lozenge by construction, whatever the mask
+      // underneath it looks like. Displacing each tap laterally by a bounded
+      // amount of an independent field makes the structuring element a ragged
+      // curve instead. Bounded well under TAIL_D[1] = 4 m on purpose, so the
+      // taps can never leapfrog and reverse the tail's order.
+      const shear = vec2(sB.a.sub(0.41), sB.b.sub(0.41)).mul((TAIL_SHEAR * k) / 0.1328);
+      const off = vec2(HX.mul(TAIL_D[k]), HZ.mul(TAIL_D[k])).add(shear).div(L);
       const g = texture(c.foamMap, uv0.add(off)).level(lod).toVar();
       trail.assign(max(trail, g.y.mul(TAIL_W[k])));
       lace.assign(max(lace, g.z.mul(TAIL_W[k])));
@@ -450,7 +517,17 @@ export function foamShading(ctx) {
   // exactly when the pixel stops being able to resolve it — cells at ~0.4 m of
   // footprint, chunk at ~1.6 m, the group masks not until ~12 m. That is a
   // three-stage band-limit for free.
-  const cells = saturate(cellN.a.mul(1.45).add(cellN.b.mul(0.5)).add(sB.b.mul(0.6)).sub(0.45)).toVar();
+  // Weight moved off A and onto B — see CELL_TILE. A is the same field at twice
+  // the frequency, so its features are half B's, and at 1.45/0.50 this carve sat
+  // 77.5% on A: the tile said 1.7 m and the eye got 16 cm. The SUM is held
+  // identical (1.95) on purpose, because detailTexture renormalises to a fixed
+  // mean and std, so every carve mean downstream — CARVE_CHUNK 0.557,
+  // CARVE_STREAK 0.723, CARVE_WEB 0.670, and the norms derived from them — stays
+  // valid without retuning. What it does NOT hold is the spread: pre-saturate
+  // variance falls 19%, which shallows the low tail, and the low tail is what
+  // punches the holes. If contrast reads short, widen the erode window rather
+  // than moving weight back onto A, which would undo the change.
+  const cells = saturate(cellN.a.mul(0.95).add(cellN.b.mul(1.00)).add(sB.b.mul(0.6)).sub(0.45)).toVar();
   // The streak tile crossfades to a longer aspect with age — see STREAK_LONG_OLD.
   const sMix = mix(sA, sAold, aged).toVar();
   const streak = sMix.b.mul(1.25).add(sMix.a.mul(0.6)).add(sB.a.mul(0.8)).sub(0.15)
@@ -459,7 +536,7 @@ export function foamShading(ctx) {
     .mul(mix(float(1.0), cells, float(0.70))).toVar();
   // The lacy carve mixes three frequencies *and* two anisotropies on purpose.
   // One dominant frequency at a threshold is a halftone screen.
-  const web = cellN.a.mul(0.70).add(cellN.b.mul(0.55)).add(sB.a.mul(0.55)).add(sA.b.mul(0.45)).sub(0.25).toVar();
+  const web = cellN.a.mul(0.55).add(cellN.b.mul(0.70)).add(sB.a.mul(0.55)).add(sA.b.mul(0.45)).sub(0.25).toVar();
 
   // --- where foam is allowed to live ---------------------------------------
   // The height itself is JITTERED before any ramp, and that is not a detail. A
@@ -541,17 +618,53 @@ export function foamShading(ctx) {
   const laceM = laceA.mul(web).mul(LACE_NORM).toVar();
 
   const T = shading.foamThreshold.mul(THRESH_SCALE).toVar();
-  const soft = float(1).div(max(shading.foamScale, float(0.2))).toVar();
+  // The GUI slider now governs where the threshold sits, not how wide it is —
+  // those were one number and should never have been. Capped, because uncapped
+  // it inverts: at foamScale 0.2 the lace placement ran to 3.69, unreachable by
+  // a mask normalised to peak 1, so lace vanished entirely over the slider's
+  // bottom third.
+  const T_PLACE = float(1).div(max(shading.foamScale, float(0.2))).min(float(0.8)).toVar();
+
+  // Width comes from the pixel instead, and this is the change that hands the
+  // contour from the mask to the carve.
+  //
+  // The window used to be a fixed soft*EDGE — 0.22 / 0.34 / 0.52 mask units for
+  // cap / trail / lace. Lace's 0.52 is, at the ~0.2-per-metre roll-off of a
+  // bilinear 4 m texel, about 2.6 METRES of sea, 27 px across the sight line at
+  // 100 m. And lace is always the outermost non-zero coverage in the OVER
+  // composite, so it is lace that draws every patch's outer silhouette. The
+  // ratio of how far the carves can wander the crossing to how wide the window
+  // is came out at 0.40; an edge reads as torn only when that exceeds about 1.
+  // Below it the contour defaults to the mask's own level set, which is smooth
+  // by construction because the mask is band-limited to a 4 m grid. That is the
+  // lozenge.
+  //
+  // At ~1 px the same carves cross the threshold instead of dimming it, and the
+  // boundary becomes theirs. But the window cannot go to one pixel everywhere:
+  // on flat backs at several metres of footprint the carves have all mipped to
+  // their means, and a hard threshold on a bare bilinear interpolant draws a
+  // piecewise-hyperbolic contour that kinks at every texel boundary — the same
+  // lattice failure this file has hit twice before. So the floor widens with
+  // footprint over exactly the range that kills carve authority: tight where the
+  // carves are alive, wide where they are not.
+  const AA_MIN = 0.010; // guards fwidth == 0 on perfectly flat runs
+  const AA_MAX = 0.120;
+  const W_FLAT = 0.35; // ~the old lace band, for the carve-dead regime
+  const wFloor = saturate(footprint.div(float(1.6))).mul(W_FLAT).toVar();
 
   // Near: a threshold, for a hard fractal edge. Far: the same mask read
-  // LINEARLY, because past FAR_FOOT the foam map's mip has already replaced it
-  // with the local area fraction of foam, and a step function on an area
-  // fraction is what paints the white bar along the horizon.
-  const cut = (m, edge) => mix(
-    smoothstep(T, T.add(soft.mul(edge)), m),
-    saturate(m.mul(FAR_GAIN)).mul(FAR_CEIL),
-    far,
-  );
+  // LINEARLY, because past FAR_ONSET the foam map's mip has replaced it with the
+  // local area fraction of foam, and a step function on an area fraction is what
+  // paints the white bar along the horizon.
+  const cut = (m, edge) => {
+    const t = T.add(T_PLACE.mul(edge * 0.5)).toVar();
+    const w = fwidth(m).mul(0.5).clamp(AA_MIN, AA_MAX).max(wFloor).toVar();
+    return mix(
+      smoothstep(t.sub(w), t.add(w), m),
+      saturate(m.mul(FAR_GAIN)).mul(FAR_CEIL),
+      far,
+    );
+  };
   const capC = cut(capM, EDGE_CAP).mul(OP_CAP).toVar();
   const trailC = cut(trailM, EDGE_TRAIL).mul(OP_TRAIL).toVar();
   const laceC = cut(laceM, EDGE_LACE).mul(OP_LACE).toVar();
@@ -565,7 +678,7 @@ export function foamShading(ctx) {
   const over = capC.add(
     trailC.add(laceC.mul(float(1).sub(trailC))).mul(float(1).sub(capC)),
   ).toVar();
-  const raw = mix(over, max(capC, max(trailC, laceC)), far).min(float(OP_CAP)).toVar();
+  const raw = mix(over, max(capC, max(trailC, laceC)), far).min(float(COMPOSITE_MAX)).toVar();
 
   // Erosion, punched into the finished OPACITY rather than into the mask, and
   // driven by age — see AGE_FULL. Shaped as MOSTLY-OPEN WITH HOLES rather than
@@ -606,7 +719,14 @@ export function foamShading(ctx) {
     cellUV.x.mul(0.87).sub(cellUV.y.mul(0.50)),
     cellUV.x.mul(0.50).add(cellUV.y.mul(0.87)),
   ).toVar();
-  const eCell = texture(detailTex, eUV.div(float(CELL_TILE).mul(aged.mul(HOLE_GROW).add(1)))).toVar();
+  // The 1.27 base sits here rather than in HOLE_GROW so the aged tile lands at
+  // 2.8 x 1.82 = 5.10 m against CHUNK_TILE/2 = 3.25 m — a ratio of 1.57, safely
+  // clear of the octave that makes two value-noise lattices reinforce instead of
+  // interfere. Shipped before this change it was 2.64 against 3.25, a ratio of
+  // 1.23, which is close enough to that octave to have been a standing risk.
+  const eCell = texture(detailTex, eUV.div(
+    float(CELL_TILE).mul(aged.mul(HOLE_GROW).add(1.27)),
+  )).toVar();
   // Four terms across three scales and two frames, and a window wide enough not
   // to trace any one of their lattices. detailTexture bakes value noise with a
   // smoothstep interpolant, so its iso-contours bunch along the lattice edges
@@ -615,7 +735,7 @@ export function foamShading(ctx) {
   // age-driven floor below takes it to nearly 7:1 again at HOLE_FLOOR_OLD, which
   // is deliberately not the 25:1 it was first set to.
   const erode = smoothstep(float(0.10), float(0.62), saturate(
-    eCell.a.mul(0.90).add(eCell.b.mul(0.70))
+    eCell.a.mul(0.70).add(eCell.b.mul(0.90))
       .add(chunkN.b.mul(0.80)).add(cellN.a.mul(0.70)).sub(0.79),
   )).toVar();
   const holeFloor = mix(float(HOLE_FLOOR_NEW), float(HOLE_FLOOR_OLD), aged).toVar();
