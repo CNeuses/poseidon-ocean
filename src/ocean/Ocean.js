@@ -22,7 +22,8 @@ export class Ocean {
     // One source of truth for the foam anisotropy axis — see foamHeading().
     // maps.js drifts the break stencil along it and foamShading.js builds every
     // stretched tile, tail tap and lean test on it, so it cannot be two values.
-    this.foamHeading = uniform(new Vector2(...foamHeading(params)));
+    this.foamHeadingVec = foamHeading(params);
+    this.foamHeading = uniform(new Vector2(...this.foamHeadingVec));
 
     this.shared = createSharedSpectrumUniforms();
     applySpectrumParams(this.shared, params);
@@ -81,6 +82,7 @@ export class Ocean {
         detailTex,
         time: this.time,
         heading: this.foamHeading,
+        headingVec: this.foamHeadingVec,
       });
       c.displacement = maps.displacement;
       c.derivatives = maps.derivatives;

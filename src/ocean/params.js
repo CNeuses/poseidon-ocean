@@ -332,3 +332,43 @@ export function foamHeading(p) {
   const m = Math.hypot(x, z) || 1;
   return [x / m, z / m];
 }
+
+// An INTEGER lattice vector pointing (as nearly as it can) along the heading.
+//
+// This is what lets the break stencil in maps.js be aligned to the waves rather
+// than to the world axes. The problem it solves is stated in that file: a
+// rotated UV is periodic on a square torus only at a measure-zero set of angles,
+// and any other angle puts a hard seam in the injection field at the tile
+// boundary — a straight line of foam across the sea every 1024 m.
+//
+// But that measure-zero set is the RATIONAL directions, and those are dense. If
+// (q, p) are integers then sampling
+//
+//     u = k * ( q*fx + p*fz )        v = m * ( -p*fx + q*fz )
+//
+// on the fractional label coordinate is exactly periodic — advancing fx or fz by
+// 1 changes both arguments by an integer — for ANY integer k and m. So the
+// stencil can be laid out along the wave at essentially any heading, with no
+// seam, by picking the best rational approximation to it.
+//
+// The cost is that the tile size quantises: one period along the heading is
+// L / (k * |(q,p)|) metres, so the achievable sizes step in k. With a magnitude
+// of about 14 on a 1024 m cascade the steps are 75, 38, 25, 19 m — fine enough
+// that nothing downstream notices.
+//
+// maxDen bounds the magnitude: a larger denominator matches the angle better and
+// makes the tile quantisation coarser, and past about 16 the angle is already
+// closer than the wave field's own directional spread.
+export function foamLattice(hx, hz, maxDen = 16) {
+  let best = null;
+  for (let d = 1; d <= maxDen; d++) {
+    const q = Math.round(hx * d);
+    const p = Math.round(hz * d);
+    if (q === 0 && p === 0) continue;
+    const mag = Math.hypot(q, p);
+    // angular error against the true heading, in radians
+    const err = Math.abs(Math.atan2(p / mag, q / mag) - Math.atan2(hz, hx));
+    if (!best || err < best.err - 1e-9) best = { q, p, mag, err };
+  }
+  return best ?? { q: 1, p: 0, mag: 1, err: 0 };
+}

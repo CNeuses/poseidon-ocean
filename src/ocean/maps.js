@@ -1,4 +1,5 @@
 import { StorageTexture, HalfFloatType, RepeatWrapping, LinearMipmapLinearFilter } from 'three/webgpu';
+import { foamLattice } from './params.js';
 import {
   Fn, instanceIndex, uint, uvec2, vec2, vec3, vec4, float, max, length, saturate,
   smoothstep, exp, mix, attributeArray, textureStore, texture,
@@ -91,8 +92,15 @@ const BRK_HI = 0.52;
 // quarter of the water breaks forever and the rest never does, repeating at the
 // patch size, which is visible within seconds from a fixed camera. The drift is
 // along the foam heading at roughly the group velocity of the breaking band.
-const EVT_LONG = 128; // m along the drift axis — long enough that an event survives the sweep
-const EVT_WIDE = 32; // m across it — the fbm's coarsest octave is a quarter of the tile, so ~8 m segments
+// Now measured IN THE WAVE FRAME rather than on the world axes — see the
+// rotated sampling in the kernel. A whitecap is a segment of a breaking crest,
+// so the eligible region should be a band lying ALONG the crest: narrow across
+// the direction of travel, long down the crest line. Feature size is 0.19 x
+// tile, so these draw roughly 3.6 m across and 14 m along — inside the 1-15 m
+// Lambda(c) breaking-segment range, and shaped like a whitecap rather than like
+// a blob that happens to overlap one.
+const EVT_ACROSS_CREST = 19; // m of tile along the heading
+const EVT_ALONG_CREST = 75; // m of tile along the crest line
 // Sigmas of the detail texture's N(0.4089, 0.1328). This pair is THE ration
 // knob for the whole system: how much of the sea is foam is decided here, by a
 // geometric stencil that closes on a fixed fraction whatever the waves are
@@ -131,8 +139,8 @@ const EVT_WIDE = 32; // m across it — the fbm's coarsest octave is a quarter o
 //
 // The centre sets the ration (about 15% of the surface eligible at +1.04
 // sigma); the width sets whether an event is an event.
-const EVT_LO = 0.566;
-const EVT_HI = 0.600;
+const EVT_LO = 0.536;
+const EVT_HI = 0.570;
 // Lateral diffusion of the foam accumulators, per 1/60 s — see the spreading
 // block in the kernel. At 0.16 a hairline reaches about three texels, i.e.
 // twelve metres, over the cap's one-second life, which is a whitecap rather
@@ -295,7 +303,7 @@ function mapTexture(N, mips = false) {
 // now carry the surface divergence and the foam age, which are the two scalars
 // foamShading needs and cannot reconstruct downstream.
 export function createCascadeMaps(cascade, {
-  N, lambda, dt, foamDecay, detailTex, time, heading,
+  N, lambda, dt, foamDecay, detailTex, time, heading, headingVec,
 }) {
   const displacement = mapTexture(N);
   const derivatives = mapTexture(N);
@@ -309,8 +317,15 @@ export function createCascadeMaps(cascade, {
   // The realised tile is L/n metres, which quantises the target: 128/32 m on
   // the 1024 m cascade, 144/28.8 m on the 144 m one.
   const L = cascade.lengthScale;
-  const nLong = Math.max(1, Math.round(L / EVT_LONG));
-  const nWide = Math.max(1, Math.round(L / EVT_WIDE));
+  // Integer lattice pointing along the wave heading — see foamLattice(). This is
+  // what lets the stencil be laid out ALONG THE CREST instead of along the world
+  // axes, without a tile seam. Baked at construction, like the tile counts it
+  // replaces; a runtime wind change leaves it stale until the cascade is rebuilt.
+  const lat = foamLattice(headingVec[0], headingVec[1]);
+  // One period along an axis is L / (k * |lattice|) metres, so k is chosen from
+  // the target feature size the same way the old axis-aligned counts were.
+  const kAcross = Math.max(1, Math.round(L / (lat.mag * EVT_ACROSS_CREST)));
+  const kAlong = Math.max(1, Math.round(L / (lat.mag * EVT_ALONG_CREST)));
 
   const assemble = Fn(() => {
     const id = instanceIndex;
@@ -360,9 +375,16 @@ export function createCascadeMaps(cascade, {
     const fx = float(coord.x).div(float(N)).toVar();
     const fz = float(coord.y).div(float(N)).toVar();
     const dr = time.mul(EVT_DRIFT).toVar();
+    // Rotated into the wave frame, on an integer lattice so it still wraps
+    // exactly. `u` runs along the heading (the narrow axis — this is what
+    // segments a crest), `v` runs along the crest line (the long axis, so an
+    // eligible stretch is a band lying along the crest rather than a blob
+    // crossing several of them). The drift is along the heading only.
+    const u = fx.mul(lat.q).add(fz.mul(lat.p)).toVar();
+    const v = fx.mul(-lat.p).add(fz.mul(lat.q)).toVar();
     const evt = texture(detailTex, vec2(
-      fx.mul(nLong).add(dr.mul(heading.x).mul(nLong / L)),
-      fz.mul(nWide).add(dr.mul(heading.y).mul(nWide / L)),
+      u.mul(kAcross).add(dr.mul(lat.mag * kAcross / L)),
+      v.mul(kAlong),
     )).level(0).b.toVar();
     const gate = smoothstep(float(EVT_LO), float(EVT_HI), evt).toVar();
 

@@ -427,9 +427,26 @@ const SAT_BOOST = 1.12;
 // read as fog lying on the surface. And kept small — this is the only foam term
 // with no threshold, no group mask and no opacity ceiling, so it is the one that
 // can quietly turn the whole sea to milk.
-const PLUME_RADIUS = 8.0; // m of lateral spread, as a mip level below
-const PLUME_COLOR = vec3(0.62, 0.92, 0.99);
-const PLUME_GAIN = 0.15;
+// Sized from reference rather than from caution. In photographs of a real
+// breaking sea the submerged cloud is not a hint — it is often the largest pale
+// feature in the frame, covering more area than the white surface foam and
+// reaching well outside it, because the plume spans 1.5-3x the surface patch's
+// plan area and outlives it by as much again. The first pass here was set at a
+// gain of 0.15 over an 8 m radius, which is a whisper, and the frame it was
+// tuned against had almost no visible plume at all.
+//
+// The colour is no longer an authored swatch. It was (0.62, 0.92, 0.99) —
+// derived from Pope & Fry pure water, i.e. Jerlov IB, which is a water type
+// nothing else in this project models, and it came out BLUE-peaked. Bubble
+// backscatter is spectrally flat, so what leaves the plume is that flat source
+// times the round-trip attenuation of the water above it — and taken through
+// this file's own muWater (Jerlov 1C-3C, from water.js) that is GREEN-peaked
+// jade, not cyan. Computed per pixel below, so a patch of water the mass wander
+// has painted clearer also gets a clearer-looking plume: one noise field, three
+// consistent consequences.
+const PLUME_RADIUS = 14.0; // m of lateral spread, as a mip level below
+const PLUME_DEPTH = 1.1; // m of water the backscatter travels back up through
+const PLUME_GAIN = 0.62;
 
 export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, detailTex }) {
   const mat = new MeshBasicNodeMaterial();
@@ -903,8 +920,12 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     if (cascades[0]?.foamMap) {
       const texelM = lengthScales[0] / cascades[0].N;
       const lodP = log2(footprint.div(texelM)).max(float(Math.log2(Math.max(PLUME_RADIUS / texelM, 1))));
+      // .z is the lace channel — the longest-lived surface accumulator, and the
+      // best proxy available for "this water broke recently" without a fourth
+      // one. Read at a coarse mip so the cloud is wider and softer than the foam
+      // drawn on top of it, which is the relationship in the reference.
       const pl = texture(cascades[0].foamMap, worldXZ.div(lengthScales[0])).level(lodP).z;
-      plume.assign(PLUME_COLOR.mul(pl.mul(PLUME_GAIN)));
+      plume.assign(exp(muWater.mul(-2 * PLUME_DEPTH)).mul(pl.mul(PLUME_GAIN)));
     }
     const water = mix(body.add(glow).add(plume), refl, fres).toVar();
     // A deliberate chroma push, on the water and nothing else — see SAT_BOOST.
