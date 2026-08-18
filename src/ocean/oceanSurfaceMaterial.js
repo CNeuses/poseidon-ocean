@@ -161,15 +161,43 @@ const HEIGHT_SOFT = 1.3; // softness of the height ramp; larger = lazier gradien
 // 0.90 at mean level and 0.94 on a crest: same value range, no ceiling.
 const BODY_BIAS = 1.07;
 const BODY_SOFT = 0.27;
-// Red is small but never zero. At literally 0.002 the sea comes out of ACES as
-// printer cyan — a dye, not a body of water — and the highlights have nothing
-// to roll toward. The deep end is biased GREEN rather than blue as well: a
-// shadowed tropical trough is bottle-green, not navy.
-const TROUGH_COLOR = vec3(0.0080, 0.0190, 0.0160); // near-black bottle green, shadowed floor
-const ABYSS_COLOR = vec3(0.0170, 0.0440, 0.0400); // the deep end of the mass wander
-const BODY_COLOR = vec3(0.0280, 0.0930, 0.0995); // deep blue-green: the bulk of the sea
-const CREST_COLOR = vec3(0.1650, 0.5200, 0.4700); // thin sunlit water at the lip
-const BODY_BLUE = vec3(0.0210, 0.0720, 0.1150); // the bluer end of the mass wander
+// Red is small but never zero. At literally 0.002 the sea comes out as printer
+// cyan — a dye, not a body of water — and the highlights have nothing to roll
+// toward.
+//
+// The deep end used to be biased GREEN, on the argument that a shadowed
+// tropical trough is bottle-green rather than navy. That is true of the sea
+// this project was originally aimed at and false of the one in the reference,
+// and the gap it left was not subtle: measured over the foreground band,
+// B is the maximum channel in 100.0% of the reference's water pixels and in
+// 1.9-15.2% of ours. Not a hue that needs nudging — a channel ordering that
+// was inverted almost everywhere.
+//
+// So every swatch below is now a rotation of the reference's own measured
+// clean water, which normalises to (0.17, 0.44, 1.00) linear, i.e. R/G 0.386
+// and B/G 2.273. The rotation is applied at CONSTANT LUMINANCE — each swatch
+// keeps its old Y = 0.2126R + 0.7152G + 0.0722B to four figures — so this
+// moves hue and nothing else. Every ramp, knee and asymptote built on these
+// (BODY_BIAS, MASS_*, SHALLOW_MAX, the skyVis chain) is untouched by
+// construction, which is the whole reason for doing it that way rather than
+// by eye.
+//
+// CREST_COLOR is rotated only HALFWAY, and the reason is that it turned out to
+// be doing two jobs. Nominally it is thin water at the lip, where the round
+// trip is short enough that green survives — the reference shows exactly that,
+// a distinct turquoise in every backlit lip, and it is what water.js exists to
+// make reachable. But it is mixed in through `shallow`, which runs to
+// SHALLOW_MAX 0.88 over the whole sunlit shoulder of a swell and not just the
+// lip. Left unrotated it put teal back across the largest lit surface in the
+// frame while everything under it went blue. Half the rotation (B/G 0.90 ->
+// 1.55) keeps a genuinely thin lip reading turquoise and takes the broad
+// shoulder tint with the rest of the sea. If the lip ever needs its green
+// back, this is the constant, and narrowing `shallow` is the alternative.
+const TROUGH_COLOR = vec3(0.0066, 0.0171, 0.0389); // near-black navy, shadowed floor
+const ABYSS_COLOR = vec3(0.0152, 0.0395, 0.0898); // the deep end of the mass wander
+const BODY_COLOR = vec3(0.0320, 0.0828, 0.1883); // deep blue: the bulk of the sea
+const CREST_COLOR = vec3(0.1710, 0.4890, 0.7560); // thin sunlit water at the lip — see above
+const BODY_BLUE = vec3(0.0258, 0.0668, 0.1519); // the bluer end of the mass wander
 const SHALLOW_MAX = 0.88; // crest water is never *pure* scatter paint
 // Wander of the water mass' own colour. The tile sizes matter as much as the
 // amount: at 0.0016 (a 625 m tile) the near field crossed three or four code
@@ -278,7 +306,16 @@ const MU_TURBID = vec3(...diffusionAttenuation('3C'));
 // this term is ADDED on the whole sunlit shoulder of every swell, so the red
 // went everywhere the sun hit and the sea turned olive — the one colour the
 // original note in this file warns against. Only the lip may go gold.
-const SCATTER_COLOR = vec3(0.088, 0.300, 0.282);
+//
+// Rotated blue with the body swatches — same constant-luminance rotation onto
+// the reference's (0.386, 1.0, 2.273). This is the term that decides what
+// colour the sunlit shoulder of every swell is, because it is ADDED there, and
+// leaving it green while the body went blue would have put a green cast back
+// over exactly the half of the sea that catches the light. It is also the
+// physically right direction: this is light that goes down into the water,
+// turns around and comes back, and over several metres of open ocean the only
+// band with any of that left is blue.
+const SCATTER_COLOR = vec3(0.1018, 0.2638, 0.5996);
 const SCATTER_GAIN = 1.05;
 const SCATTER_BASE = 0.26; // ...at its weakest, on water that stands proud of nothing
 
@@ -396,7 +433,18 @@ const FAR_SINK_RANGE = 4000;
 // A last, deliberate chroma push. ACES at exposure 1.2 desaturates hard, and
 // the reflection is a large fraction of most pixels; without this the frame
 // grades out cooler and greyer than any of the palette swatches suggest.
-const SAT_BOOST = 1.12;
+//
+// 1.00, i.e. off, because the curve it was correcting for is gone — main.js
+// swapped ACES for Khronos PBR Neutral and flagged this constant as doing less
+// work than it was written for. Left in at 1.12 it was doing the opposite of
+// its purpose: measured over the foreground band, our median pixel saturation
+// is 0.61-0.67 against the reference's 0.351, and the top decile runs 0.854.
+// Foam at 85% saturation is not white foam, and extrapolating away from
+// luminance is what put it there.
+//
+// Kept as a named constant rather than deleted along with the two lines below,
+// because it is one number and the grade may want it back on a different sky.
+const SAT_BOOST = 1.00;
 
 // The ocean surface: multi-cascade displacement (vertex) + water shading
 // (fragment). Shading is manual (unlit MeshBasicNodeMaterial): the normal is
