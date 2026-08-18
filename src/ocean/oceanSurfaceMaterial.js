@@ -182,7 +182,7 @@ const BODY_SOFT = 0.27;
 // construction, which is the whole reason for doing it that way rather than
 // by eye.
 //
-// CREST_COLOR is rotated only HALFWAY, and the reason is that it turned out to
+// SEA.crest is rotated only HALFWAY, and the reason is that it turned out to
 // be doing two jobs. Nominally it is thin water at the lip, where the round
 // trip is short enough that green survives — the reference shows exactly that,
 // a distinct turquoise in every backlit lip, and it is what water.js exists to
@@ -193,11 +193,26 @@ const BODY_SOFT = 0.27;
 // 1.55) keeps a genuinely thin lip reading turquoise and takes the broad
 // shoulder tint with the rest of the sea. If the lip ever needs its green
 // back, this is the constant, and narrowing `shallow` is the alternative.
-const TROUGH_COLOR = vec3(0.0066, 0.0171, 0.0389); // near-black navy, shadowed floor
-const ABYSS_COLOR = vec3(0.0152, 0.0395, 0.0898); // the deep end of the mass wander
-const BODY_COLOR = vec3(0.0320, 0.0828, 0.1883); // deep blue: the bulk of the sea
-const CREST_COLOR = vec3(0.1710, 0.4890, 0.7560); // thin sunlit water at the lip — see above
-const BODY_BLUE = vec3(0.0258, 0.0668, 0.1519); // the bluer end of the mass wander
+// Both seas are kept, and `shading.palette` crossfades between them: 0 is the
+// tropical green this project was originally aimed at, 1 the open-ocean blue
+// the reference photograph measures. They are not two grades of one look, they
+// are two different bodies of water, and the choice belongs to the shot.
+//
+// A single lerp is the whole mechanism, and it is exact at both ends — mix()
+// returns its arguments at 0 and 1 — so neither sea is an approximation of the
+// other. It also means the in-between is meaningful rather than a transition
+// artifact: every pair below is a constant-luminance rotation of the same
+// swatch, so interpolating them sweeps hue along a line and never dips through
+// a value or saturation the endpoints do not have.
+const SEA = {
+  //                    green (tropical)                blue (open ocean)
+  trough: [vec3(0.0080, 0.0190, 0.0160), vec3(0.0066, 0.0171, 0.0389)], // shadowed floor
+  abyss: [vec3(0.0170, 0.0440, 0.0400), vec3(0.0152, 0.0395, 0.0898)], // deep end of the mass wander
+  body: [vec3(0.0280, 0.0930, 0.0995), vec3(0.0320, 0.0828, 0.1883)], // the bulk of the sea
+  crest: [vec3(0.1650, 0.5200, 0.4700), vec3(0.1710, 0.4890, 0.7560)], // thin sunlit water at the lip
+  bodyBlue: [vec3(0.0210, 0.0720, 0.1150), vec3(0.0258, 0.0668, 0.1519)], // bluer end of the wander
+  scatter: [vec3(0.0880, 0.3000, 0.2820), vec3(0.1018, 0.2638, 0.5996)], // single scattering — see SCATTER_GAIN
+};
 const SHALLOW_MAX = 0.88; // crest water is never *pure* scatter paint
 // Wander of the water mass' own colour. The tile sizes matter as much as the
 // amount: at 0.0016 (a 625 m tile) the near field crossed three or four code
@@ -314,8 +329,8 @@ const MU_TURBID = vec3(...diffusionAttenuation('3C'));
 // over exactly the half of the sea that catches the light. It is also the
 // physically right direction: this is light that goes down into the water,
 // turns around and comes back, and over several metres of open ocean the only
-// band with any of that left is blue.
-const SCATTER_COLOR = vec3(0.1018, 0.2638, 0.5996);
+// band with any of that left is blue. The swatch pair itself lives with the
+// other five in SEA, so the whole sea moves on one uniform.
 const SCATTER_GAIN = 1.05;
 const SCATTER_BASE = 0.26; // ...at its weakest, on water that stands proud of nothing
 
@@ -443,8 +458,10 @@ const FAR_SINK_RANGE = 4000;
 // luminance is what put it there.
 //
 // Kept as a named constant rather than deleted along with the two lines below,
-// because it is one number and the grade may want it back on a different sky.
-const SAT_BOOST = 1.00;
+// because it is one number and the grade may want it back on a different sky —
+// and the green sea, which was authored under ACES, is exactly that sky, so it
+// keeps its 1.12 and rides the same palette lerp as the swatches.
+const SAT_BOOST = [1.12, 1.00];
 
 // The ocean surface: multi-cascade displacement (vertex) + water shading
 // (fragment). Shading is manual (unlit MeshBasicNodeMaterial): the normal is
@@ -508,6 +525,13 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
   // offset here keeps every map lookup in true world space, so the wave field
   // stays put while the tile slides over it.
   const worldXZ = vec2(positionGeometry.x, positionGeometry.y).add(shading.originXZ);
+  // Resolve the sea palette once — see SEA. Each of these is used exactly once
+  // downstream, so this is six mix() nodes in the graph and not a fetch, a
+  // branch or a variant.
+  const sea = Object.fromEntries(
+    Object.entries(SEA).map(([k, [g, b]]) => [k, mix(g, b, shading.palette)]),
+  );
+  const satBoost = mix(float(SAT_BOOST[0]), float(SAT_BOOST[1]), shading.palette);
 
   mat.positionNode = Fn(() => {
     const disp = vec3(0).toVar();
@@ -784,7 +808,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
       .div(1.9).sub(0.5).mul(MASS_AMOUNT).toVar();
     // Asymptotic, NOT saturate(). This is the line that drew the paint-by-
     // numbers coastlines: saturate(mass * 1.2 + 0.18) pinned every point below
-    // mass = -0.15 to exactly BODY_COLOR, so half the near field was one flat
+    // mass = -0.15 to exactly the body swatch, so half the near field was one flat
     // colour with a one-pixel staircase where it started to move again. x/(|x|+k)
     // has the same shape and the same range and can never reach either end.
     const massT = mass.div(abs(mass).add(MASS_SOFT)).mul(0.5).add(0.5).toVar();
@@ -797,8 +821,8 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // The deep anchor keeps some green in it: the palette's deep swatch is a
     // near-black navy, and letting the wander run all the way to it turned the
     // shadowed troughs slate-grey instead of the green-black a warm sea has.
-    const abyss = mix(vec3(shading.deepColor), ABYSS_COLOR, float(0.65)).toVar();
-    const deepBody = mix(BODY_COLOR, abyss, massT).toVar();
+    const abyss = mix(vec3(shading.deepColor), sea.abyss, float(0.65)).toVar();
+    const deepBody = mix(sea.body, abyss, massT).toVar();
     // A second, independent axis: hue rather than value. Depth alone gives one
     // colour getting darker; a real sea also swings between blue-green over
     // deep water and a greener cast where it is shallower or richer, and having
@@ -806,7 +830,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // grey-scale field tinted teal.
     const hue = texture(detailTex, worldXZ.mul(MASS_HUE).add(vec2(t.mul(-0.0022), t.mul(0.0017)))).a
       .sub(0.5).mul(2.2).toVar();
-    deepBody.assign(mix(deepBody, BODY_BLUE,
+    deepBody.assign(mix(deepBody, sea.bodyBlue,
       hue.div(abs(hue).add(0.9)).mul(0.5).add(0.5).mul(MASS_HUE_AMOUNT)));
 
     // trough floor -> body -> thin lit crest, as one continuous run.
@@ -815,7 +839,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // flat card and drew a horizontal contour under it.
     const hB = hN.add(BODY_BIAS).toVar();
     const rise = hB.div(abs(hB).add(BODY_SOFT)).mul(0.5).add(0.5).toVar();
-    const body = mix(TROUGH_COLOR, deepBody, rise).toVar();
+    const body = mix(sea.trough, deepBody, rise).toVar();
     // Thin water reads shallow where the water IS thin — which is the measured
     // quantity two lines up, not the surface's facing. Gating on facing had the
     // effect exactly inside out: a 75-degree overhanging lip, the one place the
@@ -829,7 +853,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
       .mul(float(0.85).add(facing.mul(0.15))).toVar();
     // The crest tint keeps the palette uniform in play so the GUI still bites,
     // pulled toward a more saturated turquoise than a mid teal swatch can give.
-    body.assign(mix(body, mix(vec3(shading.scatterColor), CREST_COLOR, float(0.72)), shallow));
+    body.assign(mix(body, mix(vec3(shading.scatterColor), sea.crest, float(0.72)), shallow));
 
     // Down in a trough the water only sees a slot of sky between the walls
     // around it; on a crest it sees the whole dome. This is what stops the
@@ -868,7 +892,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // of a swell — if it appears, raise the white share, not the gain.
     body.mulAssign(mix(SHADOW_TINT, mix(vec3(shading.sunColor), vec3(1), float(0.28)).mul(1.26),
       saturate(sunWrap.add(thinP.mul(0.35)))));
-    // Single scattering, added rather than multiplied — see SCATTER_COLOR. Every
+    // Single scattering, added rather than multiplied — see SEA.scatter. Every
     // other path to brightness in this file is either an attenuation of a dark
     // swatch or a reflection of the sky, so the frame's value histogram was
     // bimodal with a hole from 0.15 to 0.45 linear and the sea had no turquoise
@@ -877,7 +901,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // the measured thinness so a lip gets three times what a trough floor does,
     // and multiplied by the group occlusion so a hollow stays dark.
     const sunN = saturate(dot(N, shading.sunDir)).toVar();
-    body.addAssign(SCATTER_COLOR.mul(vec3(shading.sunColor)).mul(sunN)
+    body.addAssign(sea.scatter.mul(vec3(shading.sunColor)).mul(sunN)
       .mul(mix(float(SCATTER_BASE), float(1), thinP)).mul(groupOcc).mul(SCATTER_GAIN));
     refl.mulAssign(float(0.55).add(skyVis.mul(0.5)));
 
@@ -981,7 +1005,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // are white by intent, and extrapolating a white away from its own luminance
     // only ever finds a colour cast to exaggerate.
     const waterL = dot(water, vec3(0.2126, 0.7152, 0.0722));
-    water.assign(max(mix(vec3(waterL), water, float(SAT_BOOST)), vec3(0)));
+    water.assign(max(mix(vec3(waterL), water, satBoost), vec3(0)));
 
     // --- sun glitter --------------------------------------------------------
     // One GGX lobe against the sun, rolled off through a knee instead of

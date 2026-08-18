@@ -14,7 +14,7 @@ import { createRadialGrid } from './ocean/oceanGrid.js';
 import { createAerialPerspective } from './ocean/atmosphere.js';
 import { createDebugView, spectrumDebugMaterial } from './ocean/debugView.js';
 import { createGUI } from './gui.js';
-import { createHUD } from './util/hud.js';
+import { createHUD, createPaletteSwitch } from './util/hud.js';
 import { createFlyCamera } from './util/flyCamera.js';
 import { captureConfig, applyOverrides, aimCamera } from './util/capture.js';
 
@@ -100,6 +100,10 @@ async function main() {
     ambient: uniform(new Color(c.ambient)), // measured hemisphere irradiance
     deepColor: uniform(new Color(c.deep)),
     scatterColor: uniform(new Color(c.scatter)),
+    // Which sea — 0 tropical green, 1 open-ocean blue. See SEA in
+    // oceanSurfaceMaterial.js; it is a lerp, so a shot can ask for anything
+    // between with `?p={"palette":0.5}`.
+    palette: uniform(params.palette),
     sssStrength: uniform(params.sssStrength),
     foamColor: uniform(new Color(c.foam)),
     foamThreshold: uniform(params.foamThreshold),
@@ -149,6 +153,7 @@ async function main() {
   const heightHeatmap = spectrumDebugMaterial(ocean.cascades[0].DyDxz, params.N, { exposure: 0.5 });
 
   if (!shot) createGUI(params, { ocean, shading, updateSun });
+  if (!shot) createPaletteSwitch(params, shading.palette);
 
   let view = 'fft';
   addEventListener('keydown', (e) => {

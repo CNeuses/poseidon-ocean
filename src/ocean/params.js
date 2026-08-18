@@ -297,6 +297,13 @@ export const params = {
     ambient: 0xa3939b,
   },
 
+  // Which sea the body swatches paint: 0 = the tropical green this project was
+  // originally aimed at, 1 = the open-ocean blue measured off the reference
+  // photograph. Not a slider between two grades — two different bodies of
+  // water, and it is a lerp only so that the switch is one uniform rather than
+  // a material rebuild. See SEA in oceanSurfaceMaterial.js.
+  palette: 1,
+
   // --- foam (step 6) ---
   foamThreshold: 0.4, // accumulated-Jacobian value below which foam appears (lower = only real breaks)
   foamScale: 2.5, // foam coverage falloff
