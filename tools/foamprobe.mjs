@@ -18,6 +18,11 @@ const CHROME = [
 const args = process.argv.slice(2);
 const mode = args.includes('--mode') ? args[args.indexOf('--mode') + 1] : 'value';
 const horizon = args.includes('--horizon') ? Number(args[args.indexOf('--horizon') + 1]) : 0.5;
+// which channel 'area' mode reads: 0=R, 1=G, 2=B. With DEBUG=1 in foamShading
+// these are the raw cap / trail / lace accumulators as the SIMULATION writes
+// them, before any carve or threshold — i.e. how much foam is generated rather
+// than how much is drawn.
+const chan = args.includes('--chan') ? Number(args[args.indexOf('--chan') + 1]) : 0;
 const files = args.filter((a) => a.endsWith('.png'));
 
 const browser = await launch({ executablePath: CHROME, headless: true, args: ['--headless=new', '--no-sandbox'] });
@@ -25,7 +30,7 @@ const page = await browser.newPage();
 
 for (const f of files) {
   const b64 = (await readFile(resolve(f))).toString('base64');
-  const out = await page.evaluate(async (dataUrl, mode, horizon) => {
+  const out = await page.evaluate(async (dataUrl, mode, horizon, chan) => {
     const img = new Image();
     img.src = dataUrl;
     await img.decode();
@@ -45,7 +50,7 @@ for (const f of files) {
     const lin = (v) => { const s = v / 255; return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; };
     if (mode === 'area') {
       // DEBUG=6 writes coverage into all three channels; sRGB-decode back to it
-      const cov = px.map((p) => lin(p[0]));
+      const cov = px.map((p) => lin(p[chan]));
       const n = cov.length;
       const frac = (t) => cov.filter((c) => c > t).length / n;
       return {
@@ -72,7 +77,7 @@ for (const f of files) {
       med: pick(0.49, 0.51),
       blownPct: +(blown * 100).toFixed(3),
     };
-  }, `data:image/png;base64,${b64}`, mode, horizon);
+  }, `data:image/png;base64,${b64}`, mode, horizon, chan);
   console.log(f.replace(/\\/g, '/'), JSON.stringify(out));
 }
 

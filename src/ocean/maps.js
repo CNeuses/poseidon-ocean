@@ -1,7 +1,7 @@
 import { StorageTexture, HalfFloatType, RepeatWrapping, LinearMipmapLinearFilter } from 'three/webgpu';
 import {
   Fn, instanceIndex, uint, uvec2, vec2, vec3, vec4, float, max, length, saturate,
-  smoothstep, exp, attributeArray, textureStore, texture,
+  smoothstep, exp, mix, attributeArray, textureStore, texture,
 } from 'three/tsl';
 
 // --- whitecap generation ---------------------------------------------------
@@ -54,8 +54,17 @@ const W_BOTH = 0.85; // steep *and* folding — the actual break
 // look, it is a wider band of foam: at 0.18/0.56 the sum crossed the low edge a
 // second or more before the crest actually folded and stayed over it a second
 // after, so every crest laid down a twenty-metre stripe. Narrow and late.
-const BRK_LO = 0.22;
-const BRK_HI = 0.59;
+// NARROW, for the same reason the event gate is — and this is the other half of
+// "rare and total". At 0.22/0.59 the window spans most of the detector's usable
+// range, so a texel whose fold and steepness are middling returns brk ~ 0.15 and
+// deposits fifteen percent of a whitecap. There is no such event. Water either
+// entrains air or it does not, and the sum crossing a line is the best proxy
+// this detector has for which. Measured before narrowing: 15.4% of the sea
+// carried cap above 0.05 and 0.37% above 0.30, i.e. 97.6% of all the foam being
+// generated was a smear too faint to draw and too widespread to threshold
+// cleanly. That is the speckle, and it is made here rather than in the shading.
+const BRK_LO = 0.44;
+const BRK_HI = 0.52;
 
 // --- along-crest segmentation of the EVENT ---------------------------------
 // A crest never goes white along its whole length at once. Breaking unzips in
@@ -108,8 +117,28 @@ const EVT_WIDE = 32; // m across it — the fbm's coarsest octave is a quarter o
 // says breaking segments actually live, so that is where the sea's foam budget
 // should be spent. This term goes back to deciding only WHERE a stretch of crest
 // is eligible, and hands the "how much" job downstream.
-const EVT_LO = 0.560;
-const EVT_HI = 0.670;
+// NARROW, and that matters far more than where it sits. This is a gate on
+// whether a stretch of water is allowed to break, so its output should be 0 or
+// 1 — a partial value does not mean "half a whitecap", it means a break that
+// deposits half the foam a break deposits, which is a thing that does not
+// happen. Every version of this until now used a window about 0.8 sigma wide,
+// so a large fraction of the surface sat at an intermediate gate and got a
+// whisper of foam. Measured on the raw accumulators with DEBUG=1: 15.4% of the
+// sea carried cap above 0.05 while only 0.37% carried it above 0.30, against a
+// full break depositing 0.83. Common and faint — the exact failure the comment
+// at the top of this block exists to prevent — and a weak wash sitting near the
+// draw threshold is what a carve downstream dices into speckle.
+//
+// The centre sets the ration (about 15% of the surface eligible at +1.04
+// sigma); the width sets whether an event is an event.
+const EVT_LO = 0.566;
+const EVT_HI = 0.600;
+// Lateral diffusion of the foam accumulators, per 1/60 s — see the spreading
+// block in the kernel. At 0.16 a hairline reaches about three texels, i.e.
+// twelve metres, over the cap's one-second life, which is a whitecap rather
+// than a knife line and is wide enough to survive the mip chain. Stable well
+// below 0.25.
+const FOAM_SPREAD = 0.16;
 const EVT_DRIFT = 4.5; // m/s, ~c/2 for the 40-100 m band that actually folds
 
 // Foam age, in seconds since this water particle was last inside a break. This
@@ -173,7 +202,8 @@ const AGE_MAX = 20; // s, clamped so the accumulator cannot drift off in still w
 // is a ten-metre ribbon behind the break — half-opaque, so it reads as foam ON
 // water rather than as a second coat of paint. Lace deposits under 0.2 and
 // lingers four seconds, a faint web spread over most of a wavelength.
-const INJ_CAP = 3.2; // 1/s of accumulation at full break
+const INJ_CAP = 7.5; // 1/s at full break — see the lateral spreading block,
+// which costs peak amplitude in exchange for a cap that is a patch not a line
 const INJ_TRAIL = 1.45;
 const INJ_LACE = 0.60;
 const TAU_CAP = 1.00; // s — thick foam right on the break
@@ -336,7 +366,59 @@ export function createCascadeMaps(cascade, {
     )).level(0).b.toVar();
     const gate = smoothstep(float(EVT_LO), float(EVT_HI), evt).toVar();
 
-    const acc = foam.element(id).toVar();
+    // --- lateral spreading ---------------------------------------------------
+    // A break entrains air over a PATCH. This detector finds a hairline: `fold`
+    // is the Jacobian passing through zero, which happens on the one or two
+    // texels where the surface has actually crossed itself, and the file has
+    // said so from the beginning — "a fold is a hairline, and one hairline per
+    // crest is not a whitecap". The compensation until now was a directed
+    // dilation in the SHADER, which widens what is drawn but cannot widen what
+    // is stored.
+    //
+    // That distinction turned out to be the whole problem. Cascade 0's texel is
+    // 4 m, so a one-texel cap is a delta function on the map, and every read of
+    // it downstream is mip-filtered by the pixel footprint: a sharp 1-texel
+    // event averaged over a several-metre footprint comes back as a faint wide
+    // smear. Measured on the raw accumulators, 15% of the sea carried cap above
+    // 0.05 while 0.4% carried it above 0.30. A weak wash over a wide area,
+    // sitting near the draw threshold, is exactly what the carves downstream
+    // dice into speckle — and no amount of work on the carves can fix a signal
+    // that is faint because it was band-limited away.
+    //
+    // Diffusing the accumulator is both the cheap fix and the physically honest
+    // one: whitewater spreads laterally from where it was entrained. Four
+    // neighbour reads on a buffer already in registers, with wraparound, which
+    // the periodic tile makes exact.
+    //
+    // ponytail: reads neighbours from the buffer this pass also writes, so a
+    // neighbour may be pre- or post-update depending on scheduling. That makes
+    // this Gauss-Seidel rather than Jacobi — order-dependent by at most one
+    // frame of diffusion, which is invisible at this coefficient and stable well
+    // below 0.25. Ping-pong buffers if it ever needs to be exact.
+    const row = coord.y.mul(uint(N));
+    const rowU = coord.y.add(uint(N - 1)).mod(uint(N)).mul(uint(N));
+    const rowD = coord.y.add(uint(1)).mod(uint(N)).mul(uint(N));
+    const cxL = coord.x.add(uint(N - 1)).mod(uint(N));
+    const cxR = coord.x.add(uint(1)).mod(uint(N));
+    const nb = foam.element(row.add(cxL))
+      .add(foam.element(row.add(cxR)))
+      .add(foam.element(rowU.add(coord.x)))
+      .add(foam.element(rowD.add(coord.x)))
+      .mul(0.25).toVar();
+    const self = foam.element(id).toVar();
+    // Age is NOT diffused — it is a per-particle clock, and averaging it with
+    // the neighbours would make the age of foam depend on how long ago the water
+    // NEXT to it broke.
+    // CAP ONLY. Diffusion conserves mass, so spreading a channel costs it peak
+    // amplitude, and the aged channels cannot afford that: they live for seconds,
+    // so they diffuse for seconds, and measured with the spread applied to all
+    // three the lace channel lost its entire population above 0.30. They also do
+    // not need it — the wave train sweeping through the label field already
+    // gives them a band tens of metres wide. It is only the cap that is born as
+    // a hairline, and only fresh whitewater that actually spreads under its own
+    // turbulence. INJ_CAP carries the compensation for what the diffusion costs.
+    const spread = saturate(dt.mul(60).mul(FOAM_SPREAD)).toVar();
+    const acc = vec4(mix(self.x, nb.x, spread), self.y, self.z, self.w).toVar();
     const inj = brk.mul(gate).mul(dt).toVar();
     const cap = saturate(acc.x.mul(exp(dt.mul(-1 / TAU_CAP))).add(inj.mul(INJ_CAP))).toVar();
     const trail = saturate(
