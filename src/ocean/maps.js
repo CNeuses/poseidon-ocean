@@ -108,8 +108,8 @@ const EVT_WIDE = 32; // m across it — the fbm's coarsest octave is a quarter o
 // says breaking segments actually live, so that is where the sea's foam budget
 // should be spent. This term goes back to deciding only WHERE a stretch of crest
 // is eligible, and hands the "how much" job downstream.
-const EVT_LO = 0.430;
-const EVT_HI = 0.540;
+const EVT_LO = 0.560;
+const EVT_HI = 0.670;
 const EVT_DRIFT = 4.5; // m/s, ~c/2 for the 40-100 m band that actually folds
 
 // Foam age, in seconds since this water particle was last inside a break. This
