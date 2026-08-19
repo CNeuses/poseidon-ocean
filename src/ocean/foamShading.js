@@ -1,6 +1,6 @@
 import {
   vec2, vec3, float, texture, saturate, smoothstep, dot, mix, max, log2, fwidth, abs,
-  positionWorld,
+  positionWorld, floor, fract, step, sin, sqrt,
 } from 'three/tsl';
 import { FOAM_PEAK } from './maps.js';
 
@@ -53,6 +53,31 @@ import { FOAM_PEAK } from './maps.js';
 // Height that reads as a full crest — matches WAVE_SCALE in
 // oceanSurfaceMaterial.js, which is the same wave the value ramp is keyed to.
 const WAVE_SCALE = 2.6;
+
+// --- the macro amplitude envelope -------------------------------------------
+// An FFT sea is periodic BY CONSTRUCTION — cascade 0 repeats every 1024 m and
+// the chop tile every 144 m, and from altitude the same neighbourhood marches
+// across the frame however aperiodic the foam texturing is. No in-sim trick
+// can fix that: a compute texel IS every repeat of itself at once. What CAN
+// differ per repeat is rendering: this world-anchored, kilometre-scale field
+// (two octaves, 2400 m and 770 m — both incommensurate with 1024 and 144, so
+// the combined period is tens of km) scales the displacement, the normals and
+// the foam of the two wave-carrying cascades per WORLD position. Tile copies
+// stop being identical because each copy renders under a different local sea
+// energy — which is also just true of real seas: wave groupiness at km scale.
+// Mean 1 by construction, clamped to +/-40%.
+//
+// ponytail: the sim's detectors ignore the envelope — a damped region's foam
+// is damped by the same field at draw time (env^3, breaking scales
+// superlinearly with amplitude), not by re-detecting. A +/-25% regional
+// mismatch between detector and drawn geometry is invisible; re-simulating
+// per world instance is impossible in a periodic sim.
+export function ampEnvelope(detailTex, uv) {
+  const a = texture(detailTex, uv.div(2400)).level(0).b;
+  const b = texture(detailTex, uv.div(770).add(0.37)).level(0).a;
+  return a.sub(0.4089).mul(1.35).add(b.sub(0.4089).mul(0.75)).add(1)
+    .clamp(0.6, 1.4);
+}
 
 // Noise tile sizes in metres. The baked fbm's coarsest octave is a quarter of
 // its tile and its finest is a thirty-second, so a 30 m tile draws roughly
@@ -183,7 +208,7 @@ const ALBEDO_TILT = vec3(0.94, 1.0, 1.0);
 // about 1.5x hot for the curve that actually runs. The albedo above is what
 // pays for that; the gains are unchanged.
 const SUN_GAIN = 2.05;
-const SKY_GAIN = 1.05;
+const SKY_GAIN = 1.18;
 // How far the sun is pulled toward its own luminance-grey BEFORE it lights foam,
 // and this is a geometry argument rather than a grade. The sun here is golden
 // hour: 0xffd395 resolves to a linear (1.15, 0.749, 0.346), a red-to-blue ratio
@@ -235,8 +260,8 @@ const SKY_VIS_MIN = 0.70;
 // inherently soft. That is half of why residual foam read as an airbrush.
 const FAR_ONSET = 2.0; // m of footprint before the linear read starts to mix in
 const FAR_SPAN = 2.0; // ...and over which it takes over completely
-const FAR_GAIN = 1.7; // ...compensating for the carves having gone to their means
-const FAR_CEIL = 0.60; // and a ceiling, so a grazing view is caps on blue, never a sheet
+const FAR_GAIN = 1.25; // ...compensating for the carves having gone to their means
+const FAR_CEIL = 0.34; // and a ceiling, so a grazing view is caps on blue, never a sheet
 // The blunt second distance ramp that used to sit alongside this — a straight
 // fade of COVERAGE over view distance — is gone. It double-counted a term that
 // oceanSurfaceMaterial.js already applies correctly at the end of colorNode,
@@ -250,7 +275,32 @@ const FAR_CEIL = 0.60; // and a ceiling, so a grazing view is caps on blue, neve
 // in oceanSurfaceMaterial, so it is also the opacity.
 const OP_CAP = 0.75;
 const OP_TRAIL = 0.50;
-const OP_LACE = 0.25;
+const OP_LACE = 0.34;
+// The windrow remnant — maps.js's second exponential (foamMap2.x), the
+// 30-90 s surfactant-stabilised population that is 80-90% of the foam area on
+// a real sea. Thin by definition: a veil the sea reads through, organised into
+// downwind lanes by the sim's decay field, drawn here as long ribbons.
+const OP_REM = 0.24;
+const EDGE_REM = 0.85;
+const REM_LONG = 130; // m — windrow ribbons: long along the wind...
+const REM_WIDE = 9; // ...tens of metres apart across it
+
+// --- the active state --------------------------------------------------------
+// "Breaking right now" is its own material, not the top of the age ladder.
+// Koepke 1984: foam reflectance drops from 40-55% fresh to 3-10% after ~10 s —
+// the fresh cap is the brightest thing on the water and visibly distinct from
+// every grey translucent thing around it, and one shared opacity ceiling
+// cannot express that. Keyed on high cap AND low age; gives the cap near-full
+// opacity and a lit-value boost toward the 0.8-0.9 linear a sunlit cauliflower
+// crest actually is.
+const ACTIVE_AGE = 0.8; // s of age under which a strong cap counts as active
+const ACTIVE_BOOST = 1.7; // lit-value multiplier at full activity
+// ...and the other end: age now also rides on VALUE, gently. The alpha ladder
+// still does most of Koepke's reflectance drop (thin foam transmits water);
+// this is the residual brightness loss of a draining raft. Gentle on purpose —
+// the ash failure is real — and running on the long clock, past AGE_FULL.
+const OLD_VALUE = 0.82;
+const AGE_VALUE_FULL = 12; // s to reach it
 // Ceiling on the OVER composite, which is a different number from OP_CAP and
 // was wrong to share it. With trail at 0.50 and lace at 0.25 the composite base
 // is already 0.625, so clamping the sum at 0.75 started clipping once capC
@@ -282,6 +332,14 @@ const CARVE_WEB = 0.317; // fil() mean 0.40 x the cellular mix's 0.79
 const CAP_NORM = 1 / (FOAM_PEAK.cap * GATE_CAP * CARVE_CHUNK);
 const TRAIL_NORM = 1 / (FOAM_PEAK.trail * GATE_TRAIL * CARVE_STREAK);
 const LACE_NORM = 1 / (FOAM_PEAK.lace * GATE_LACE * CARVE_WEB);
+// webR's own carve mean: fil at width 0.20 (mean ~0.47) x its cellular mix
+// (~0.85) -- NOT the lace web's 0.317, which under-normalised nothing but ran
+// the remnant ~25% hot against its threshold.
+const CARVE_WEB_REM = 0.40;
+const REM_NORM = 1 / (FOAM_PEAK.rem * GATE_LACE * CARVE_WEB_REM); // patch gate only
+// The norms are all "peak of one break at the reference wind = 1". A harder
+// sea's residScale pushes the residual masks PAST 1 by design — that overrun
+// is the Monahan budget arriving as broader area above the threshold.
 
 // params.foamThreshold is 0.4 and params.js belongs to another lane, so the
 // working value is scaled here — the GUI slider still bites, the default just
@@ -294,8 +352,13 @@ const THRESH_SCALE = 1.10;
 // foamScale of 2.5 they put the crossings at 0.55 / 0.61 / 0.70 against a base
 // T of 0.44, which is where the old ramps were half open.
 const EDGE_CAP = 0.55;
-const EDGE_TRAIL = 0.85;
-const EDGE_LACE = 1.30;
+// Both residual placements came DOWN (0.85 / 1.30 before): with the highest
+// threshold in the file sitting on the lowest-amplitude masks, the aged
+// channels the sim wrote mostly never drew, and the sea kept its foam only at
+// the crests — the crest-locked snow-cap look. Lace at 0.95 is what lets the
+// trough web actually cross.
+const EDGE_TRAIL = 0.72;
+const EDGE_LACE = 1.02;
 
 // Local prominence, in metres of sea the "height around here" probe averages
 // over, and the height above that average which reads as a full lip. Height
@@ -311,11 +374,11 @@ const EDGE_LACE = 1.30;
 const LIP_RADIUS = 10.0;
 const LIP_DEPTH = 0.15;
 // The tail. Offsets in metres DOWNWIND of the shaded point, so a break sampled
-// ahead of us is painted behind itself. Lengthened from [0, 1.6, 3.4, 5.6]:
-// cascade 0's texel is 4.0 m, so the old offsets were 0.4, 0.85 and 1.4 TEXELS
-// and three of the four taps were reading essentially the same bilinear
-// neighbourhood. These reach across the 23 m band the sim now writes.
-const TAIL_D = [0.0, 4.0, 9.0, 15.0];
+// ahead of us is painted behind itself. Lengthened again, to the c*tau of the
+// band that actually breaks: the 40-100 m waves fold at 8-12 m/s phase speed
+// against ~2.6 s of effective trail decay, which is a 20-30 m streamer, and a
+// 15 m reach was clipping the far half of every one of them.
+const TAIL_D = [0.0, 6.0, 14.0, 24.0];
 const TAIL_W = [1.0, 0.78, 0.58, 0.36];
 // Metres of lateral shear per tap index — see the loop. Tap 3 picks up ~0.75 m,
 // which is enough to make the dilation's structuring element a curve and small
@@ -394,6 +457,44 @@ export function foamShading(ctx) {
 
   // world size of this pixel — the same band-limit the surface normal uses
   const footprint = max(fwidth(worldXZ.x), fwidth(worldXZ.y)).max(1e-3).toVar();
+
+  // --- stochastic tiling ----------------------------------------------------
+  // Heitz-style hex tile-and-blend for the small-period anisotropic taps. The
+  // filament frames repeat at their ACROSS period — 1.0 m for the fine streak
+  // tile, 3.2 m for the lace frame, 2.8 m for the cells — and at close range
+  // that prints as the same squiggle marching across the raft. The domain
+  // wander only TRANSLATES the frames; it cannot break the tiling inside
+  // them. Here every ~half-tile hex cell samples the texture at its own
+  // hashed offset, blended with variance-preserving weights, so the pattern
+  // never lines up with itself again while the mean and std — and therefore
+  // every carve mean and norm in this file — are preserved by construction.
+  // The gap masks, wander, chunk and erode taps stay plain on purpose: the
+  // group masks are MEANT to be fixed geometry, and the others already carry
+  // their own decorrelation defences.
+  const HEX = 1.8; // hex cells per texture tile
+  const hash2 = (v) => fract(sin(vec2(
+    dot(v, vec2(127.1, 311.7)),
+    dot(v, vec2(269.5, 183.3)),
+  )).mul(43758.5453));
+  const hexTap = (uv) => {
+    const g = uv.mul(HEX);
+    const sk = vec2(g.x.sub(g.y.mul(0.57735)), g.y.mul(1.15470)).toVar();
+    const base = floor(sk).toVar();
+    const f = fract(sk).toVar();
+    const upper = step(float(1), f.x.add(f.y)).toVar();
+    const v0 = base.add(mix(vec2(0, 0), vec2(1, 1), upper)).toVar();
+    const v1 = base.add(vec2(1, 0)).toVar();
+    const v2 = base.add(vec2(0, 1)).toVar();
+    const w0 = mix(float(1).sub(f.x).sub(f.y), f.x.add(f.y).sub(1), upper).toVar();
+    const w1 = mix(f.x, float(1).sub(f.y), upper).toVar();
+    const w2 = mix(f.y, float(1).sub(f.x), upper).toVar();
+    const M = float(0.4089); // the bake's renormalised mean, every channel
+    const t0 = texture(detailTex, uv.add(hash2(v0))).sub(M);
+    const t1 = texture(detailTex, uv.add(hash2(v1))).sub(M);
+    const t2 = texture(detailTex, uv.add(hash2(v2))).sub(M);
+    const norm = sqrt(w0.mul(w0).add(w1.mul(w1)).add(w2.mul(w2))).max(1e-4);
+    return t0.mul(w0).add(t1.mul(w1)).add(t2.mul(w2)).div(norm).add(M).toVar();
+  };
   const far = saturate(footprint.sub(FAR_ONSET).div(FAR_SPAN)).toVar();
 
   // --- break-up noise -------------------------------------------------------
@@ -425,18 +526,31 @@ export function foamShading(ctx) {
   // gradient of a smooth field is small: detailTexture packs it as
   // (-h' * 3 * 0.5 + 0.5) into 8 bits and the whole field lands inside 128 +/- 3.
   const cellUV = fineXZ.add(vec2(chunkN.b.sub(0.41), chunkN.a.sub(0.41)).mul(CELL_WARP)).toVar();
-  const cellN = texture(detailTex, cellUV.div(CELL_TILE)).toVar();
+  const cellN = hexTap(cellUV.div(CELL_TILE));
   // Two warps, at two scales, before either streak tile is sampled. One warp is
   // not enough: warping only the fine tile leaves the COARSE ribbons on a fixed
   // spacing, and the comb of fingers running down a wave face comes out evenly
   // spaced — a picket fence at whitecap scale.
   const across0 = acrossF.add(chunkN.b.sub(0.44).mul(WARP_COARSE)).toVar();
-  const sA = texture(detailTex, vec2(alongF.add(drift).div(STREAK_LONG), across0.div(STREAK_WIDE))).toVar();
-  const sAold = texture(detailTex, vec2(alongF.add(drift).div(STREAK_LONG_OLD), across0.div(STREAK_WIDE))).toVar();
+  const sA = hexTap(vec2(alongF.add(drift).div(STREAK_LONG), across0.div(STREAK_WIDE)));
+  const sAold = hexTap(vec2(alongF.add(drift).div(STREAK_LONG_OLD), across0.div(STREAK_WIDE)));
   const acrossW = across0.add(sA.b.sub(0.44).mul(WARP)).toVar();
-  const sB = texture(detailTex, vec2(alongF.add(drift.mul(1.7)).div(STREAK_LONG2), acrossW.div(STREAK_WIDE2))).toVar();
+  const sB = hexTap(vec2(alongF.add(drift.mul(1.7)).div(STREAK_LONG2), acrossW.div(STREAK_WIDE2)));
+  // The windrow frame: far longer than any streak tile, because a wind lane is
+  // a different object from a whitecap's trail — see REM_LONG.
+  const sR = hexTap(vec2(alongF.add(drift.mul(0.5)).div(REM_LONG), across0.div(REM_WIDE)));
   const gapA = texture(detailTex, vec2(along.div(GAP_A_LONG), across.div(GAP_A_WIDE))).toVar();
   const gapB = texture(detailTex, vec2(along.div(GAP_B_LONG), across.div(GAP_B_WIDE))).toVar();
+  // Centimetre-scale filaments, only where a pixel can resolve them: one tap
+  // at a 34 cm tile, faded out by a 30 cm footprint, mean held at ~1 so no
+  // norm downstream moves. This is the band the 0.4-6.5 m tiles above cannot
+  // reach, and its absence is why near foam read as airbrushed at arm's length.
+  const fineN = texture(detailTex, fineXZ.div(0.34)).toVar();
+  // Faded by 0.09 m, NOT by the 0.3 m the tap was first gated at: fineN.a's
+  // structure has mipped to its mean by a 0.09 m footprint, and fil() of the
+  // mean is the transform's MAXIMUM -- the wider window held the whole
+  // 0.1-0.3 m band at ~1.35x and inflated near-field coverage 15-35%.
+  const fineW = saturate(float(1).sub(footprint.div(0.09))).toVar();
 
   // --- the three ages -------------------------------------------------------
   // The maps are indexed by the undisplaced grid coordinate — the Lagrangian
@@ -470,8 +584,19 @@ export function foamShading(ctx) {
     const cw = CASCADE_W[i] ?? CASCADE_W[CASCADE_W.length - 1];
 
     const f = texture(c.foamMap, uv0).level(lod).toVar();
-    cap.assign(max(cap, f.x.mul(cw)));
-    if (i > 0) return;
+    // The onset envelope gates the DRAWN cap as well as the injection: the
+    // accumulator saturates fast enough that an injection-only ramp is mostly
+    // clipped away, and it is the drawn value the eye watches appear.
+    const f2b = texture(c.foamMap2, uv0).level(lod).z;
+    cap.assign(max(cap, f.x.mul(cw).mul(mix(float(0.10), float(1.0), f2b))));
+    if (i > 0) {
+      // The chop band leaves a SHORT residue at quarter weight — enough that a
+      // near-field trough carries chop-scale streaking between the swell's own
+      // trails, not enough to rebuild the flat veil the full-weight version
+      // painted. No tail taps: its 4-24 m waves sweep their own ribbons.
+      trail.assign(max(trail, f.y.mul(0.25)));
+      return;
+    }
 
     trail.assign(max(trail, f.y));
     lace.assign(max(lace, f.z));
@@ -500,6 +625,26 @@ export function foamShading(ctx) {
   // aspect — everything that makes decay a change of SHAPE rather than a ramp
   // on alpha, which is the difference between foam dying and foam dissolving.
   const aged = saturate(ageV.div(AGE_FULL)).toVar();
+
+  // The macro envelope, cubed: foam follows the local sea energy the geometry
+  // is drawn at — see ampEnvelope. This is the term that stops the same foam
+  // neighbourhood repeating every tile, and it adds the km-scale patchiness
+  // real storm seas have for free.
+  const envF = ampEnvelope(detailTex, worldXZ).toVar();
+  const envF3 = envF.mul(envF).mul(envF).toVar();
+  cap.mulAssign(envF3);
+  trail.mulAssign(envF3);
+  lace.mulAssign(envF3);
+
+  // The remnant channel — cascade 0's foamMap2.x, the sim's long second
+  // exponential. Read plain (no tail dilation: the sim's own transport and
+  // lane decay already gave it its shape).
+  const rem = float(0).toVar();
+  if (cascades[0]?.foamMap2) {
+    const L0 = lengthScales[0];
+    const lodR = log2(footprint.div(L0 / cascades[0].N)).max(0);
+    rem.assign(texture(cascades[0].foamMap2, worldXZ.div(L0)).level(lodR).x.mul(envF3));
+  }
 
   // --- where the lip is, and which way the water is straining ---------------
   // Two taps on cascade 0's displacement: this pixel's own mip level, and the
@@ -590,8 +735,12 @@ export function foamShading(ctx) {
   // Streaks: the frame is already stretched 9:1 and 23:1 along the heading and
   // domain-warped twice, so its contours are long ribbons running downwind —
   // the trail a crest leaves behind itself.
+  // The cm-scale filament term rides on both residual carves. Mean ~1.02 by
+  // construction (0.45 * 0.9 + 0.62), so the norms above stay honest; range
+  // 0.62-1.52, gated to the footprints that can resolve it — see fineW.
+  const fine = mix(float(1.0), fil(fineN.a, float(0.24)).mul(0.9).add(0.62), fineW).toVar();
   const streak = fil(sMix.b, float(FIL_W_STREAK))
-    .mul(mix(float(1.0), cells, float(0.55))).toVar();
+    .mul(mix(float(1.0), cells, float(0.55))).mul(fine).toVar();
   const chunk = chunkN.b.mul(1.55).add(chunkN.a.mul(0.85)).sub(0.20)
     .mul(mix(float(1.0), cells, float(0.70))).toVar();
   // The lacy carve mixes three frequencies *and* two anisotropies on purpose.
@@ -606,6 +755,13 @@ export function foamShading(ctx) {
   // into disconnected fragments as they die rather than dictating their shape.
   const web = fil(sA.b, float(FIL_W_WEB))
     .mul(mix(float(1.0), cellN.r.mul(0.55).add(cellN.g.mul(0.45)).add(0.18), float(0.6)))
+    .mul(fine).toVar();
+  // Windrow ribbons for the remnant: same filament transform on the 130 x 9 m
+  // frame, torn apart by the cellular pair at half strength. Long, sparse,
+  // wind-aligned — the "foam blown in streaks along the wind" of the Beaufort
+  // 7 definition itself.
+  const webR = fil(sR.b, float(0.20))
+    .mul(mix(float(1.0), cellN.r.mul(0.6).add(cellN.g.mul(0.4)).add(0.15), float(0.5)))
     .toVar();
 
   // --- where foam is allowed to live ---------------------------------------
@@ -672,7 +828,12 @@ export function foamShading(ctx) {
   // to ration it — that is the event stencil's job now.
   const patch = saturate(gapA.b.mul(2.5).sub(0.45))
     .mul(saturate(gapB.b.mul(2.5).sub(0.45))).toVar();
-  const patchG = mix(float(0.70), float(1.0), patch).toVar();
+  // The floor CLOSES with distance. Near, the masks only vary the foam (the
+  // ration is the stencil's job); far, they are the only structure a pixel can
+  // still resolve, and a 0.70 floor there meant no stretch of horizon could
+  // ever go clean — which is half of why the far field read as an even sprinkle
+  // rather than as clustered fleets of caps with dark sea between them.
+  const patchG = mix(mix(float(0.70), float(0.30), far), float(1.0), patch).toVar();
 
 
   const capA = cap.mul(mix(float(0.05), float(1.0), capVeto))
@@ -682,11 +843,18 @@ export function foamShading(ctx) {
   const trailA = trail.mul(mix(float(0.35), float(1.0), trailH))
     .mul(patchG).mul(conc).toVar();
   const laceA = lace.mul(patchG).mul(conc).toVar();
+  const remA = rem.mul(patchG).mul(conc).toVar();
 
   // --- coverage -------------------------------------------------------------
   const capM = capA.mul(chunk).mul(CAP_NORM).toVar();
   const trailM = trailA.mul(streak).mul(TRAIL_NORM).toVar();
   const laceM = laceA.mul(web).mul(LACE_NORM).toVar();
+  const remM = remA.mul(webR).mul(REM_NORM).toVar();
+
+  // Breaking RIGHT NOW — see ACTIVE_AGE. Gated on the raw (pre-carve) cap so
+  // the state does not flicker with the hole texture.
+  const act = saturate(capA.mul(CAP_NORM))
+    .mul(smoothstep(float(ACTIVE_AGE * 1.6), float(ACTIVE_AGE * 0.4), ageV)).toVar();
 
   const T = shading.foamThreshold.mul(THRESH_SCALE).toVar();
   // The GUI slider now governs where the threshold sits, not how wide it is —
@@ -720,7 +888,7 @@ export function foamShading(ctx) {
   // carves are alive, wide where they are not.
   const AA_MIN = 0.010; // guards fwidth == 0 on perfectly flat runs
   const AA_MAX = 0.120;
-  const W_FLAT = 0.35; // ~the old lace band, for the carve-dead regime
+  const W_FLAT = 0.28; // carve-dead-regime window: wide enough to hide the texel lattice (0.22 printed stair-step foam edges), narrow enough that mid-field flecks stay solid rather than smearing into grain
   const wFloor = saturate(footprint.div(float(1.6))).mul(W_FLAT).toVar();
 
   // Near: a threshold, for a hard fractal edge. Far: the same mask read
@@ -732,24 +900,38 @@ export function foamShading(ctx) {
     const w = fwidth(m).mul(0.5).clamp(AA_MIN, AA_MAX).max(wFloor).toVar();
     return mix(
       smoothstep(t.sub(w), t.add(w), m),
-      saturate(m.mul(FAR_GAIN)).mul(FAR_CEIL),
+      // the bias culls the low-mean wash so distant foam stays CLUSTERED —
+      // flecks over dark sea, never a sheet; the photo's far field is 2-5%
+      saturate(m.mul(FAR_GAIN).sub(0.26)).mul(FAR_CEIL),
       far,
     );
   };
-  const capC = cut(capM, EDGE_CAP).mul(OP_CAP).toVar();
-  const trailC = cut(trailM, EDGE_TRAIL).mul(OP_TRAIL).toVar();
-  const laceC = cut(laceM, EDGE_LACE).mul(OP_LACE).toVar();
+  // An active cap opens its ceiling to near-opaque — a fresh raft IS optically
+  // thick — while everything aged keeps the thin ladder.
+  const capC = cut(capM, EDGE_CAP).mul(mix(float(OP_CAP), float(0.98), act)).toVar();
+  // Each residual ceiling carries a shallow CONTINUOUS ramp on its own mask's
+  // overshoot. Fixed ceilings on near-binary cuts posterised the composite
+  // into three flat alpha levels; 18% of amplitude ride is enough to break
+  // the levels without moving the mean coverage the ceilings were set for.
+  const opMod = (m) => saturate(m.mul(0.4)).mul(0.18).add(0.86);
+  const trailC = cut(trailM, EDGE_TRAIL).mul(OP_TRAIL).mul(opMod(trailM)).toVar();
+  const laceC = cut(laceM, EDGE_LACE).mul(OP_LACE).mul(opMod(laceM)).toVar();
+  const remC = cut(remM, EDGE_REM).mul(OP_REM).mul(opMod(remM)).toVar();
 
-  // Near field: composite the three OVER each other, so a fresh cap sits ON the
+  // Near field: composite the four OVER each other, so a fresh cap sits ON the
   // older foam around it and the regimes read as layers of one process rather
-  // than as one mask at three opacities. Far field: max(), because once the
-  // mip has area-averaged a pixel there is no layering left to model — the three
-  // channels are nested, lace containing trail containing cap, so the widest one
-  // is the answer and OVER would just inflate it into the horizon bar.
+  // than as one mask at four opacities. Far field: max(), because once the
+  // mip has area-averaged a pixel there is no layering left to model — the
+  // channels are nested, remnant containing lace containing trail containing
+  // cap, so the widest one is the answer and OVER would just inflate it into
+  // the horizon bar.
   const over = capC.add(
-    trailC.add(laceC.mul(float(1).sub(trailC))).mul(float(1).sub(capC)),
+    trailC.add(
+      laceC.add(remC.mul(float(1).sub(laceC))).mul(float(1).sub(trailC)),
+    ).mul(float(1).sub(capC)),
   ).toVar();
-  const raw = mix(over, max(capC, max(trailC, laceC)), far).min(float(COMPOSITE_MAX)).toVar();
+  const raw = mix(over, max(max(capC, remC), max(trailC, laceC)), far)
+    .min(mix(float(COMPOSITE_MAX), float(0.98), act)).toVar();
 
   // Erosion, punched into the finished OPACITY rather than into the mask, and
   // driven by age — see AGE_FULL. Shaped as MOSTLY-OPEN WITH HOLES rather than
@@ -815,6 +997,11 @@ export function foamShading(ctx) {
   )).toVar();
   const holeFloor = mix(float(HOLE_FLOOR_NEW), float(HOLE_FLOOR_OLD), aged).toVar();
   const coverage = raw.mul(mix(holeFloor, float(1.0), erode)).toVar();
+  // What the BRDF feedback wants is the PRE-erosion opacity: the water inside
+  // a raft's holes is churned and bubbly, not a clean dielectric, so specular
+  // suppression must not come back where the holes punch through — that is
+  // exactly what made foam interiors sparkle.
+  const presence = raw.toVar();
 
   // --- shading --------------------------------------------------------------
   // One white albedo. Age is alpha and nothing else: foam scatters conservatively
@@ -851,7 +1038,13 @@ export function foamShading(ctx) {
   const ambL = dot(amb, vec3(0.2126, 0.7152, 0.0722)).toVar();
   const sky = mix(amb, AMBIENT_COOL.mul(ambL), float(AMBIENT_NEUTRAL)).mul(SKY_GAIN);
   const skyVis = mix(float(SKY_VIS_MIN), float(1.0), old).toVar();
-  const lit = albedo.mul(sun.add(sky.mul(skyVis))).toVar();
+  // The two-state value ladder — see ACTIVE_BOOST / OLD_VALUE. An active cap
+  // is pushed toward the 0.8-0.9 linear a sunlit breaking crest measures; aged
+  // foam gives back a gentle share of value on the long clock, on top of the
+  // opacity ladder that models the rest of Koepke's reflectance drop.
+  const ageVal = mix(float(1.0), float(OLD_VALUE), saturate(ageV.div(AGE_VALUE_FULL))).toVar();
+  const lit = albedo.mul(sun.add(sky.mul(skyVis)))
+    .mul(ageVal.mul(mix(float(1.0), float(ACTIVE_BOOST), act))).toVar();
 
   // A few percent of grain so a thick cap is a raft of bubbles with pockets in
   // it rather than a smooth card. Bounded on purpose: the break-up is the
@@ -861,12 +1054,18 @@ export function foamShading(ctx) {
     .clamp(0.88, 1.06).toVar();
   const color = lit.mul(grain);
 
-  if (DEBUG === 1) return { coverage: float(1), color: vec3(cap, trail, lace) };
-  if (DEBUG === 2) return { coverage: float(1), color: vec3(capA, trailA, laceA) };
-  if (DEBUG === 3) return { coverage: float(1), color: vec3(capC, trailC, laceC) };
-  if (DEBUG === 4) return { coverage: float(1), color: vec3(patch, face, far) };
-  if (DEBUG === 5) return { coverage: float(0), color: vec3(1) };
-  if (DEBUG === 6) return { coverage: float(1), color: vec3(coverage) };
-  if (DEBUG === 7) return { coverage: float(1), color: vec3(aged, lip, divR) };
-  return { coverage, color };
+  const dbg = { presence: float(0) };
+  if (DEBUG === 1) return { ...dbg, coverage: float(1), color: vec3(cap, trail, lace) };
+  if (DEBUG === 2) return { ...dbg, coverage: float(1), color: vec3(capA, trailA, laceA) };
+  if (DEBUG === 3) return { ...dbg, coverage: float(1), color: vec3(capC, trailC, laceC) };
+  if (DEBUG === 4) return { ...dbg, coverage: float(1), color: vec3(patch, face, far) };
+  if (DEBUG === 5) return { ...dbg, coverage: float(0), color: vec3(1) };
+  if (DEBUG === 6) return { ...dbg, coverage: float(1), color: vec3(coverage) };
+  if (DEBUG === 7) return { ...dbg, coverage: float(1), color: vec3(aged, lip, divR) };
+  if (DEBUG === 8 && cascades[0]?.foamMap2) {
+    // (remnant, aeration, onset bloom) — lane field moved to .w
+    const f2 = texture(cascades[0].foamMap2, worldXZ.div(lengthScales[0])).level(0);
+    return { ...dbg, coverage: float(1), color: vec3(f2.x, f2.y, f2.z.mul(0.3)) };
+  }
+  return { coverage, color, presence };
 }

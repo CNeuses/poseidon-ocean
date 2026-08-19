@@ -5,7 +5,7 @@ import {
   length, fwidth, sqrt, exp, log2, PI,
 } from 'three/tsl';
 import { skyColor } from './sky.js';
-import { foamShading } from './foamShading.js';
+import { foamShading, ampEnvelope } from './foamShading.js';
 import { diffusionAttenuation } from './water.js';
 
 // --- look constants, local to this file -----------------------------------
@@ -204,14 +204,21 @@ const BODY_SOFT = 0.27;
 // artifact: every pair below is a constant-luminance rotation of the same
 // swatch, so interpolating them sweeps hue along a line and never dips through
 // a value or saturation the endpoints do not have.
+// The blue swatches carry a second correction beyond the hue rotation: a
+// x0.60 luminance scale (x0.75 on the lit crest, x0.70 on scatter). The
+// rotation was constant-luminance BY CONSTRUCTION, which preserved the
+// tropical sea's brightness — and the reference's open ocean is measurably
+// darker than a sunlit tropical shelf, which is why the blue sea read as
+// powder under the midday rig. Hue untouched: each triplet is the rotated
+// swatch scaled by one scalar.
 const SEA = {
   //                    green (tropical)                blue (open ocean)
-  trough: [vec3(0.0080, 0.0190, 0.0160), vec3(0.0066, 0.0171, 0.0389)], // shadowed floor
-  abyss: [vec3(0.0170, 0.0440, 0.0400), vec3(0.0152, 0.0395, 0.0898)], // deep end of the mass wander
-  body: [vec3(0.0280, 0.0930, 0.0995), vec3(0.0320, 0.0828, 0.1883)], // the bulk of the sea
-  crest: [vec3(0.1650, 0.5200, 0.4700), vec3(0.1710, 0.4890, 0.7560)], // thin sunlit water at the lip
-  bodyBlue: [vec3(0.0210, 0.0720, 0.1150), vec3(0.0258, 0.0668, 0.1519)], // bluer end of the wander
-  scatter: [vec3(0.0880, 0.3000, 0.2820), vec3(0.1018, 0.2638, 0.5996)], // single scattering — see SCATTER_GAIN
+  trough: [vec3(0.0080, 0.0190, 0.0160), vec3(0.0040, 0.0103, 0.0233)], // shadowed floor
+  abyss: [vec3(0.0170, 0.0440, 0.0400), vec3(0.0091, 0.0237, 0.0539)], // deep end of the mass wander
+  body: [vec3(0.0280, 0.0930, 0.0995), vec3(0.0192, 0.0497, 0.1130)], // the bulk of the sea
+  crest: [vec3(0.1650, 0.5200, 0.4700), vec3(0.1283, 0.3668, 0.5670)], // thin sunlit water at the lip
+  bodyBlue: [vec3(0.0210, 0.0720, 0.1150), vec3(0.0155, 0.0401, 0.0911)], // bluer end of the wander
+  scatter: [vec3(0.0880, 0.3000, 0.2820), vec3(0.0713, 0.1847, 0.4197)], // single scattering — see SCATTER_GAIN
 };
 const SHALLOW_MAX = 0.88; // crest water is never *pure* scatter paint
 // Wander of the water mass' own colour. The tile sizes matter as much as the
@@ -229,15 +236,12 @@ const MASS_SOFT = 0.55; // knee of the asymptotic ramp it runs through
 const MASS_HUE = 0.0030; // 1/m — a third, independent axis: blue-green <-> green
 const MASS_HUE_AMOUNT = 0.50;
 const SKY_VIS_MIN = 0.34; // a trough only sees a slot of sky between its walls
-// Sky-only light on faces turned away from the sun. This was a cool blue,
-// which is correct under a midday sky and wrong under this one: the measured
-// hemisphere irradiance of the current panorama is 0xa3939b, a warm mauve-grey
-// (tools/skylight.mjs). A blue shadow under a golden sky is the second most
-// obvious tell after a white sun. Derived, not picked — the ambient hue
-// renormalised to the luminance the old constant had (0.487), so this changes
-// only the COLOUR of shadow and never how dark it is. Recompute if the sky
-// changes: hue = ambientLinear / luminance(ambientLinear) * 0.487.
-const SHADOW_TINT = vec3(0.572, 0.458, 0.519);
+// Sky-only light on faces turned away from the sun: the ambient's own hue,
+// renormalised to a fixed shadow luminance (0.487) — so the shadow is mauve
+// under the golden panorama and blue-grey under the midday one, computed in
+// the shader from the measured ambient uniform instead of frozen against one
+// sky. Changes only the COLOUR of shadow, never how dark it is.
+const SHADOW_LUM = 0.487;
 
 // Wave-group occlusion. Everything else in the value chain — the colour ramp,
 // the sky visibility, the wrapped sun — is keyed off the same two numbers
@@ -249,7 +253,7 @@ const SHADOW_TINT = vec3(0.572, 0.458, 0.519);
 // swell group goes dark whatever its own height or facing is doing.
 const GROUP_SCALE = 3.4; // metres of swell height that read as a full group
 const GROUP_SOFT = 1.0;
-const GROUP_DARK = 0.40; // how much value the bottom of a group loses
+const GROUP_DARK = 0.50; // how much value the bottom of a group loses
 const CHOP_LIFT = 0.55; // ...and how much a chop crest standing on it wins back
 
 // Subsurface scatter — the Sea of Thieves cue, and the one this file kept
@@ -331,8 +335,8 @@ const MU_TURBID = vec3(...diffusionAttenuation('3C'));
 // turns around and comes back, and over several metres of open ocean the only
 // band with any of that left is blue. The swatch pair itself lives with the
 // other five in SEA, so the whole sea moves on one uniform.
-const SCATTER_GAIN = 1.05;
-const SCATTER_BASE = 0.26; // ...at its weakest, on water that stands proud of nothing
+const SCATTER_GAIN = 0.72;
+const SCATTER_BASE = 0.16; // ...at its weakest, on water that stands proud of nothing — the floor is what decides how dark a flat trough may stay, and the reference troughs are near-black
 
 // Reflectivity with distance. Near water at eye level is grazing enough that
 // pure Schlick hands the whole frame to the sky and the sea turns grey-tan;
@@ -438,7 +442,8 @@ const SPEC_SPREAD = 0.035; // added to roughness^2 at that range
 // a fifth of sand over green reads as a mudflat. At 1/3200 the mid-field keeps
 // its own colour, the last kilometre still dissolves, and by the horizon the
 // extinction is 99.8% — which is all the horizon line needs.
-const HAZE_DENSITY = 1 / 3200; // extinction per metre at sea level
+// per-sky — see SKIES.hazeWater; resolved inside the material builder, after
+// a shot's overrides have picked the sky
 const HAZE_SCALE_H = 450; // metres for the haze to thin by 1/e
 const HORIZON_LIFT = 0.004; // elevation the haze target is sampled at: just above the line
 const SEA_SINK = 0.820; // ...and how far under the sky the sea is held
@@ -509,9 +514,49 @@ const SAT_BOOST = [1.12, 1.00];
 // jade, not cyan. Computed per pixel below, so a patch of water the mass wander
 // has painted clearer also gets a clearer-looking plume: one noise field, three
 // consistent consequences.
+//
+// REWORKED, in three ways that are each a structure change and not a gain:
+//
+//   SOURCE  it reads the dedicated aeration accumulator (foamMap2.y — tau
+//           30-120 s in maps.js), not the lace channel. Slaving the plume to
+//           lace's ~5 s lifetime was the deepest of the three faults: real
+//           plumes are the LONGEST-lived stage of the lifecycle, visible for
+//           >50 wave periods, which is why the reference's near field is
+//           mostly plume with a web of foam on top.
+//   KNEE    the accumulator is taken through a/(a+k) before the gain, so
+//           recently-broken water reaches near-full milkiness instead of the
+//           source's small linear value whispering through: the old peak
+//           worked out at ~0.05 linear against the reference's 0.4-0.6.
+//   FRESNEL aeration suppresses the Fresnel mix (see AER_FRES at use). The
+//           old plume sat wholly on the transmitted side, so the distance-
+//           keyed grazing release erased it exactly where a deck camera sees
+//           the reference's plume dominate. Aerated water is not a clean
+//           dielectric mirror.
 const PLUME_RADIUS = 14.0; // m of lateral spread, as a mip level below
-const PLUME_DEPTH = 1.1; // m of water the backscatter travels back up through
-const PLUME_GAIN = 0.62;
+const PLUME_DEPTH = 0.85; // m of water the backscatter travels back up through
+const PLUME_KNEE = 0.14; // accumulator value at half milkiness
+const PLUME_GAIN = 0.62; // peak plume ~0.21/0.39/0.34 linear through 1C water
+const PLUME_PARALLAX = 1.2; // m of nominal depth for the view-parallax tap
+const AER_FRES = 0.30; // how much full aeration suppresses the mirror
+// Foam feeding back into the water BRDF — the fix for foam printing as grey
+// glossy sheen. Every surveyed production ocean does this (Atlas, gasgiant,
+// Godot): foam-covered water is matte, so coverage raises roughness and pulls
+// both Fresnel terms down BEFORE the specular lobe and sky mirror are built,
+// and the final alpha lerp then lays matte foam over matte water instead of
+// translucent foam over a mirror.
+const FOAM_ROUGH = 0.78;
+const FOAM_FRES = 0.92; // sky-mirror suppression at full presence
+// Sun glint DIES on foam — a bubble raft has no coherent facet to mirror the
+// disc, and neither does the churned water in its holes. The kill runs on the
+// PRE-erosion presence and saturates by ~45% presence, so even thin lace
+// carries no sparkle; clean water between separate rafts keeps its glint.
+const FOAM_SPEC_KILL = 2.2;
+// Specular anti-aliasing: where the normal varies fast inside one pixel
+// (contour-grazing wave outlines), the GGX lobe both widens and desaturates,
+// which removes the warm per-pixel speckle that traced wave contours in the
+// away framings.
+const SPEC_AA_VAR = 6.0; // roughness^2 added per unit of normal fwidth
+const SPEC_AA_DESAT = 0.6;
 
 export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, detailTex }) {
   const mat = new MeshBasicNodeMaterial();
@@ -534,9 +579,15 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
   const satBoost = mix(float(SAT_BOOST[0]), float(SAT_BOOST[1]), shading.palette);
 
   mat.positionNode = Fn(() => {
+    // The macro amplitude envelope — see ampEnvelope in foamShading.js. The
+    // two wave-carrying cascades scale by the local sea energy, so the 1024 m
+    // and 144 m tile repeats stop being identical copies. Cascade 2 is 24 m
+    // ripple no altitude can read; it stays flat.
+    const env = ampEnvelope(detailTex, worldXZ).toVar();
     const disp = vec3(0).toVar();
     cascades.forEach((c, i) => {
-      disp.addAssign(texture(c.displacement, worldXZ.div(lengthScales[i])).level(0).xyz);
+      const d = texture(c.displacement, worldXZ.div(lengthScales[i])).level(0).xyz;
+      disp.addAssign(i <= 1 ? d.mul(env) : d);
     });
     return vec3(positionGeometry.x.add(disp.x), disp.y, positionGeometry.y.add(disp.z));
   })();
@@ -556,12 +607,15 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // pixel becoming a wider lobe.
     const footprint = max(fwidth(worldXZ.x), fwidth(worldXZ.y)).max(1e-3).toVar();
 
+    // same envelope as positionNode — the normal must belong to the geometry
+    const envC = ampEnvelope(detailTex, worldXZ).toVar();
     const d = vec4(0).toVar();
     const lostVar = float(0).toVar();
     cascades.forEach((c, i) => {
       const texelM = lengthScales[i] / c.N;
       const lod = log2(footprint.div(texelM)).max(0);
-      const s = texture(c.derivatives, worldXZ.div(lengthScales[i])).level(lod).toVar();
+      const s0 = texture(c.derivatives, worldXZ.div(lengthScales[i])).level(lod).toVar();
+      const s = (i <= 1 ? s0.mul(envC) : s0).toVar();
       const w = saturate(float(lengthScales[i] / FEATURE_DIV).div(footprint)).toVar();
       d.addAssign(s.mul(w));
       lostVar.addAssign(s.x.mul(s.x).add(s.y.mul(s.y)).mul(float(1).sub(w.mul(w))));
@@ -620,6 +674,36 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     const viewDist = length(cameraPosition.sub(positionWorld)).toVar();
     const NoV = saturate(dot(N, V)).toVar();
 
+    // --- foam & aeration, BEFORE the BRDF -----------------------------------
+    // Foam appearance lives in foamShading.js, but it is evaluated here, ahead
+    // of Fresnel and the specular lobe, because its coverage has to feed BACK
+    // into the water's BRDF — see FOAM_ROUGH. The old arrangement built the
+    // full-gloss water first and alpha-lerped foam over the finished pixel, so
+    // every partial-opacity residual patch was 40-75% clean-water mirror:
+    // grey sheen, not matte white.
+    const foam = foamShading({ cascades, lengthScales, worldXZ, shading, detailTex, N });
+    const fcov = foam.coverage.toVar();
+    // pre-erosion opacity: the BRDF must stay matte inside a raft's holes too
+    const pres = foam.presence.toVar();
+    // Aeration under this pixel: a coarse-mip base tap plus a view-parallax
+    // tap at a nominal depth, so the plume reads as a submerged volume that
+    // slides against the surface instead of as paint on it.
+    const aer = float(0).toVar();
+    if (cascades[0]?.foamMap2) {
+      const L0 = lengthScales[0];
+      const texel0 = L0 / cascades[0].N;
+      const lodP = log2(footprint.div(texel0)).max(float(Math.log2(Math.max(PLUME_RADIUS / texel0, 1)))).toVar();
+      const pOff = V.xz.mul(PLUME_PARALLAX).div(max(V.y, float(0.2)));
+      const a0 = texture(cascades[0].foamMap2, worldXZ.div(L0)).level(lodP).y;
+      const a1 = texture(cascades[0].foamMap2, worldXZ.sub(pOff).div(L0)).level(lodP).y;
+      // the plume follows the same macro energy as the foam that made it
+      aer.assign(a0.add(a1).mul(0.5).mul(envC).mul(envC));
+    }
+    const plK = aer.div(aer.add(float(PLUME_KNEE))).toVar();
+    // Foam-covered water is matte — see FOAM_ROUGH. Applied after the
+    // ROUGH_MAX clamp on purpose: foam may exceed the clean-water ceiling.
+    rough.assign(max(rough, pres.mul(FOAM_ROUGH)));
+
     // The exact dielectric Fresnel — see fresnelDielectric. What was here was
     // Schlick with a roughness-dependent exponent, `mix(5, 3.4, rough)`, bending
     // the curve to fix an error Schlick makes at grazing; it overshot instead,
@@ -646,6 +730,14 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // the far band keeps its own hue, and it is what puts a colour difference
     // under the horizon line instead of a value difference alone.
     fres.assign(min(fres, float(REFL_CEIL)));
+    // Foam and aeration both break the clean dielectric interface: foam is a
+    // diffuse solid, aerated water a scattering suspension. Suppressing the
+    // mirror here — including at the grazing angles the distance release just
+    // opened — is what lets the plume and the matte foam survive a deck-height
+    // framing, which is exactly where the reference shows them dominating.
+    fres.mulAssign(float(1).sub(pres.mul(float(FOAM_FRES))));
+    fres.mulAssign(float(1).sub(plK.mul(float(AER_FRES))));
+    fresSpec.mulAssign(saturate(float(1).sub(pres.mul(float(FOAM_SPEC_KILL)))));
 
     // --- sky reflection -----------------------------------------------------
     // As roughness rises the mirror ray relaxes toward the flat-water direction,
@@ -730,6 +822,12 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     const reflL = dot(refl, vec3(0.2126, 0.7152, 0.0722));
     refl.assign(mix(refl, mix(REFL_GREY.mul(reflL), refl, float(REFL_CHROMA)),
       saturate(rough.mul(REFL_DESAT)).mul(REFL_DESAT_CAP)));
+    // ...and the same argument per PIXEL: where the normal varies fast inside
+    // one pixel (ripple contours at grazing), a single mirror tap is a point
+    // sample of a lobe integral — pull it toward its own luminance-grey before
+    // it can print the warm haze band as magenta grains on dark water.
+    const nVarR = fwidth(N.x).add(fwidth(N.z)).toVar();
+    refl.assign(mix(refl, REFL_GREY.mul(reflL), saturate(nVarR.mul(2.5)).mul(0.55)));
 
     // --- body: real value range from trough floor to crest lip ---------------
     // The depth proxy is height above mean sea level through a soft ramp:
@@ -758,8 +856,8 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
       const texelM = L / c.N;
       const lod = log2(footprint.div(texelM)).max(0).toVar();
       const blur = Math.max(0, Math.log2(CREST_RADIUS / texelM));
-      const here = texture(c.displacement, worldXZ.div(L)).level(lod).y.toVar();
-      const wide = texture(c.displacement, worldXZ.div(L)).level(lod.max(float(blur))).y;
+      const here = texture(c.displacement, worldXZ.div(L)).level(lod).y.mul(envC).toVar();
+      const wide = texture(c.displacement, worldXZ.div(L)).level(lod.max(float(blur))).y.mul(envC);
       crestRel.addAssign(here.sub(wide));
       if (i === 0) swellH.assign(here);
     });
@@ -890,7 +988,10 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // 0.28), so this is a pure hue change and the value chain above it is
     // untouched. Olive is still the thing to watch for on the sunlit shoulder
     // of a swell — if it appears, raise the white share, not the gain.
-    body.mulAssign(mix(SHADOW_TINT, mix(vec3(shading.sunColor), vec3(1), float(0.28)).mul(1.26),
+    const ambC = vec3(shading.ambient).toVar();
+    const shadowTint = ambC.div(max(dot(ambC, vec3(0.2126, 0.7152, 0.0722)), float(1e-4)))
+      .mul(SHADOW_LUM).toVar();
+    body.mulAssign(mix(shadowTint, mix(vec3(shading.sunColor), vec3(1), float(0.28)).mul(1.26),
       saturate(sunWrap.add(thinP.mul(0.35)))));
     // Single scattering, added rather than multiplied — see SEA.scatter. Every
     // other path to brightness in this file is either an attenuation of a dark
@@ -988,17 +1089,9 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // transmitted side of the Fresnel split with the rest of the water, because
     // that is where it physically is: light scattered back out of the water
     // column, not off the surface.
-    const plume = vec3(0).toVar();
-    if (cascades[0]?.foamMap) {
-      const texelM = lengthScales[0] / cascades[0].N;
-      const lodP = log2(footprint.div(texelM)).max(float(Math.log2(Math.max(PLUME_RADIUS / texelM, 1))));
-      // .z is the lace channel — the longest-lived surface accumulator, and the
-      // best proxy available for "this water broke recently" without a fourth
-      // one. Read at a coarse mip so the cloud is wider and softer than the foam
-      // drawn on top of it, which is the relationship in the reference.
-      const pl = texture(cascades[0].foamMap, worldXZ.div(lengthScales[0])).level(lodP).z;
-      plume.assign(exp(muWater.mul(-2 * PLUME_DEPTH)).mul(pl.mul(PLUME_GAIN)));
-    }
+    // Bubble backscatter through the round trip of the water above it, driven
+    // by the knee-saturated aeration read up top — see the PLUME_KNEE block.
+    const plume = exp(muWater.mul(-2 * PLUME_DEPTH)).mul(plK.mul(float(PLUME_GAIN))).toVar();
     const water = mix(body.add(glow).add(plume), refl, fres).toVar();
     // A deliberate chroma push, on the water and nothing else — see SAT_BOOST.
     // It sits here rather than on the finished pixel because foam and glitter
@@ -1015,19 +1108,39 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     const Hv = normalize(V.add(shading.sunDir));
     // The lobe rides on a roughness that keeps widening with distance, so the
     // path broadens toward the horizon rather than breaking up into whichever
-    // far facets happen to line up.
+    // far facets happen to line up. It also widens with the normal's own
+    // per-pixel variance — specular AA, see SPEC_AA_VAR: a facet whose normal
+    // swings inside one pixel cannot hold a narrow lobe, and letting it try is
+    // what printed the warm speckle tracing wave contours in the away shots.
+    const nVar = fwidth(N.x).add(fwidth(N.z)).toVar();
     const roughSpec = min(max(sqrt(rough.mul(rough)
-      .add(saturate(viewDist.div(SPEC_SPREAD_RANGE)).mul(SPEC_SPREAD))),
+      .add(saturate(viewDist.div(SPEC_SPREAD_RANGE)).mul(SPEC_SPREAD))
+      .add(saturate(nVar.mul(SPEC_AA_VAR)).mul(0.06))),
     float(SPEC_ROUGH_MIN)), float(SPEC_ROUGH_MAX)).toVar();
     const a2 = roughSpec.mul(roughSpec).mul(roughSpec).mul(roughSpec).toVar();
     const NoH = saturate(dot(N, Hv)).toVar();
     const den = NoH.mul(NoH).mul(a2.sub(1)).add(1);
     const ggx = a2.div(den.mul(den).mul(PI)).mul(saturate(dot(N, shading.sunDir))).toVar();
-    const specTint = mix(vec3(shading.sunColor), vec3(1), float(SPEC_WHITE));
+    // ...and the same variance desaturates the tint: the average over a fast-
+    // swinging lobe is a mixture, and mixtures are never the saturated warm of
+    // any single mirror sample.
+    const stBase = mix(vec3(shading.sunColor), vec3(1), float(SPEC_WHITE)).toVar();
+    const stL = dot(stBase, vec3(0.2126, 0.7152, 0.0722));
+    const specTint = mix(stBase, vec3(stL), saturate(nVar.mul(3)).mul(SPEC_AA_DESAT));
     water.addAssign(specTint.mul(ggx.div(ggx.add(SPEC_KNEE)).mul(SPEC_MAX)).mul(fresSpec));
+    // Per-sky glint energy, gated to NEAR-MIRROR facets only. Glint is ~2%
+    // (Fresnel) of the SOLAR DISC's radiance and the 8-bit reconstruction is
+    // orders below a real disc — under the low golden sun the grazing Fresnel
+    // hid that; under the high sun it printed no sparkle at all. Boosting the
+    // whole lobe washed the far field white through the compressed skirt, so
+    // the boost rides only on the part of the lobe above GLINT_MIN — the
+    // facets actually mirroring the disc — and those clip to white through
+    // the tonemapper, which is what real midday sparkle does.
+    const glint = max(ggx.sub(float(1.5)), float(0)).toVar();
+    water.addAssign(specTint.mul(glint.div(glint.add(6)).mul(0.5 * SPEC_MAX).mul(shading.specBoost)).mul(fresSpec));
 
-    // foam appearance lives in foamShading.js
-    const foam = foamShading({ cascades, lengthScales, worldXZ, shading, detailTex, N });
+    // foam over the water — evaluated up top so its coverage could shape the
+    // BRDF; composited here, over everything that comes out of the water
     const surface = mix(water, foam.color, foam.coverage).toVar();
 
     // A crest can swallow a deck-height camera. The sheet is DoubleSide, so that
@@ -1070,9 +1183,10 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // across the whole frame — no CPU readback, no async latency, no uniform to
     // keep in sync. Cascade 2 is 24 cm of ripple and cannot decide this.
     const camWaterY = float(0).toVar();
+    const envO = ampEnvelope(detailTex, shading.originXZ).toVar();
     cascades.forEach((c, i) => {
       if (i > 1) return;
-      camWaterY.addAssign(texture(c.displacement, shading.originXZ.div(lengthScales[i])).level(0).y);
+      camWaterY.addAssign(texture(c.displacement, shading.originXZ.div(lengthScales[i])).level(0).y.mul(envO));
     });
     // Ramped over ~30 cm rather than switched, so breaking the surface is a
     // dissolve and not a cut. Approximate by design: the sample is at the
@@ -1116,7 +1230,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // everything else in the scene, so the water agrees with the spray and the
     // dome instead of drifting away from them.
     const midY = positionWorld.y.add(cameraPosition.y).mul(0.5).max(0);
-    const tau = viewDist.mul(HAZE_DENSITY).mul(exp(midY.div(-HAZE_SCALE_H)));
+    const tau = viewDist.mul(shading.hazeWater).mul(exp(midY.div(-HAZE_SCALE_H)));
     const ext = float(1).sub(exp(tau.negate())).toVar();
     // ...and the sea loses a little of its own value on top, so the band right
     // under the line reads as sea in shadow rather than as haze that happens to
