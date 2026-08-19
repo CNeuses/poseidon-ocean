@@ -4,8 +4,9 @@ import {
 } from 'three/webgpu';
 import {
   Fn, positionWorld, cameraPosition, normalize, texture, equirectUV, vec3, float,
-  max, pow, saturate, mix, smoothstep, dot,
+  max, pow, saturate, mix, smoothstep, dot, uniform,
 } from 'three/tsl';
+import { params, SKIES } from './params.js';
 
 // The sky is a baked panorama (public/sky/), replacing the procedural gradient
 // and fBm cloud decks entirely.
@@ -35,22 +36,49 @@ import {
 // minification aliasing, which this sky can afford — it is low-frequency
 // painted art, and the ocean's reflection ray already relaxes toward flat with
 // roughness before it gets here.
-const skyTex = new TextureLoader().load('/sky/sky_131_2k.png');
-skyTex.colorSpace = SRGBColorSpace; // decoded to linear; grading happens at the tonemapper
-skyTex.wrapS = RepeatWrapping; // longitude wraps
-skyTex.wrapT = ClampToEdgeWrapping; // latitude must not
-skyTex.magFilter = LinearFilter;
-skyTex.minFilter = LinearFilter;
-skyTex.generateMipmaps = false;
+// Loaded LAZILY, at the first skyColor() call, because the file is chosen by
+// params.sky and main.js applies a shot's overrides after module import — a
+// module-level load would bake the default sky into every `?p={"sky":...}`
+// capture.
+let skyTex = null;
+// The HDR reconstruction constants ride uniforms so the sky TOGGLE (see
+// createSkySwitch in hud.js) can move them live — baked as literals they
+// would need a full material rebuild per switch.
+const uKnee = uniform(0.965);
+const uBoost = uniform(9.0);
+function getSky() {
+  if (!skyTex) {
+    const def = SKIES[params.sky] ?? SKIES.midday;
+    uKnee.value = def.knee;
+    uBoost.value = def.boost;
+    skyTex = new TextureLoader().load(def.file);
+    skyTex.colorSpace = SRGBColorSpace; // decoded to linear; grading happens at the tonemapper
+    skyTex.wrapS = RepeatWrapping; // longitude wraps
+    skyTex.wrapT = ClampToEdgeWrapping; // latitude must not
+    skyTex.magFilter = LinearFilter;
+    skyTex.minFilter = LinearFilter;
+    skyTex.generateMipmaps = false;
+  }
+  return skyTex;
+}
 
-// The sun baked into this panorama, measured off the image by
-// `node tools/skylight.mjs public/sky/sky_131_2k.png`: the brightest 0.02% of
-// pixels have their luminance-weighted centroid at (838.6, 448.2) of 2048x1024,
-// which is azimuth 122.8, elevation 11.2. params.js carries those numbers and
-// the colours from the same run. Re-measure if this texture is ever swapped — a
-// sun direction that disagrees with the baked sun puts the glitter path
-// somewhere the eye can see is wrong.
-export const SKY_SUN = { azimuth: 122.8, elevation: 11.2 };
+// Live sky swap: the SAME Texture object gets the other panorama's image, so
+// every material's binding stays valid; knee/boost follow on their uniforms.
+// The lighting-rig half of a switch (sun, colours, haze, glint) lives in
+// main.js's applySkyLive, which calls this.
+export function setSkyTexture(name) {
+  const def = SKIES[name];
+  if (!def || !skyTex) return;
+  new TextureLoader().load(def.file, (t) => {
+    skyTex.image = t.image;
+    skyTex.needsUpdate = true;
+  });
+  uKnee.value = def.knee;
+  uBoost.value = def.boost;
+}
+
+// Each panorama's sun position/colours are measured by tools/skylight.mjs and
+// live in the SKIES table (params.js) — re-measure if a texture is swapped.
 
 // Below the horizon the panorama is a flat gradient with no haze band, and the
 // fog path asks for exactly those directions. Fold the lower hemisphere onto the
@@ -93,8 +121,7 @@ const FOLD = 0.03;
 // within a couple of per cent of each other whatever colour went in. The light
 // was already golden in linear space — the curve was painting it white on the
 // way out. See the tone mapping note in main.js.
-const KNEE = 0.88;
-const BOOST = 11.0;
+// Per-sky — see SKIES in params.js. Read at first use, alongside the texture.
 
 // This panorama's zenith blue is saturated enough that the ACES input matrix
 // drives its red channel negative, which clamps to 0 and prints a hard-edged
@@ -107,20 +134,21 @@ const DESAT = 0.22;
 const LUMA = vec3(0.2126, 0.7152, 0.0722);
 
 export function skyColor(dir, u) {
+  const tex = getSky();
   const d = normalize(dir).toVar();
   // smoothstep rather than max(): a hard clamp prints a seam along the line,
   // where every below-horizon ray collapses onto the same texel row.
   const y = mix(float(FOLD), d.y.max(0), smoothstep(float(-FOLD), float(FOLD), d.y));
-  const c = texture(skyTex, equirectUV(normalize(vec3(d.x, y, d.z)))).rgb.toVar();
+  const c = texture(tex, equirectUV(normalize(vec3(d.x, y, d.z)))).rgb.toVar();
   c.assign(mix(c, vec3(dot(c, LUMA)), float(DESAT)));
 
   const peak = max(max(c.r, c.g), c.b);
-  const over = saturate(peak.sub(KNEE).div(float(1 - KNEE)));
+  const over = saturate(peak.sub(uKnee).div(float(1).sub(uKnee)));
   // Normalised to a peak of 1 so this is purely a hue, and the magnitude stays
   // where BOOST puts it — sunIntensity must not double-count here.
   const sc = vec3(u.sunColor).toVar();
   const sunHue = sc.div(max(max(sc.r, sc.g), sc.b).max(float(1e-4))).toVar();
-  return c.add(c.mul(pow(over, float(4)).mul(BOOST)).mul(sunHue));
+  return c.add(c.mul(pow(over, float(4)).mul(uBoost)).mul(sunHue));
 }
 
 export function createSkyDome(u, radius = 12000) {

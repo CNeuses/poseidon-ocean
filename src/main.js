@@ -4,23 +4,26 @@ import {
 } from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import WebGPU from 'three/addons/capabilities/WebGPU.js';
-import { params } from './ocean/params.js';
+import { params, applySky, SKIES } from './ocean/params.js';
 import { Ocean } from './ocean/Ocean.js';
 import { validateFFT } from './ocean/fft.js';
 import { createOceanSurfaceMaterial } from './ocean/oceanSurfaceMaterial.js';
 import { makeDetailTexture } from './ocean/detailTexture.js';
-import { createSkyDome } from './ocean/sky.js';
+import { createSkyDome, setSkyTexture } from './ocean/sky.js';
 import { createRadialGrid } from './ocean/oceanGrid.js';
 import { createAerialPerspective } from './ocean/atmosphere.js';
-import { createDebugView, spectrumDebugMaterial } from './ocean/debugView.js';
 import { createGUI } from './gui.js';
-import { createHUD, createPaletteSwitch } from './util/hud.js';
+import { createHUD, createPaletteSwitch, createSkySwitch } from './util/hud.js';
 import { createFlyCamera } from './util/flyCamera.js';
 import { captureConfig, applyOverrides, aimCamera } from './util/capture.js';
 
 const shot = captureConfig();
 if (shot) {
   applyOverrides(params, shot.overrides);
+  if (shot.overrides?.sky) {
+    applySky(params); // the shot switched panoramas — merge that rig...
+    applyOverrides(params, shot.overrides); // ...but explicit overrides still win
+  }
   document.body.classList.add('shot'); // hides the HUD; #err stays visible
 }
 const hud = createHUD();
@@ -87,7 +90,7 @@ async function main() {
 
   camera.lookAt(0, 2, -20);
   const fly = createFlyCamera(camera, renderer.domElement);
-  if (shot) aimCamera(camera, shot.preset);
+  if (shot) aimCamera(camera, shot.preset, params);
 
   // shared shading uniforms (sky dome + ocean reflection use the same values)
   const shading = {
@@ -111,6 +114,10 @@ async function main() {
     detail: uniform(params.detailStrength),
     time: uniform(0),
     originXZ: uniform(new Vector2()), // world-space centre of the ocean tile
+    // per-sky atmosphere/glint — uniforms so the sky toggle switches them live
+    hazeWater: uniform(1 / (SKIES[params.sky]?.hazeWater ?? 3200)),
+    hazeAir: uniform(1 / (SKIES[params.sky]?.hazeAir ?? 2150)),
+    specBoost: uniform(SKIES[params.sky]?.specBoost ?? 0),
   };
   function updateSun() {
     const az = MathUtils.degToRad(params.sunAzimuth);
@@ -119,6 +126,22 @@ async function main() {
     shading.sunColor.value.set(params.colors.sun).multiplyScalar(params.sunIntensity);
   }
   updateSun();
+  // The whole rig of a sky switch, live: preset merge, sun, ambient colours,
+  // haze densities, glint boost, and the panorama swap itself.
+  function applySkyLive(name) {
+    params.sky = name;
+    applySky(params);
+    updateSun();
+    shading.horizon.value.set(params.colors.skyHorizon);
+    shading.zenith.value.set(params.colors.skyZenith);
+    shading.ambient.value.set(params.colors.ambient);
+    shading.hazeWater.value = 1 / SKIES[params.sky].hazeWater;
+    shading.hazeAir.value = 1 / SKIES[params.sky].hazeAir;
+    shading.specBoost.value = SKIES[params.sky].specBoost ?? 0;
+    setSkyTexture(params.sky);
+    // the sun sliders in the panel follow the new rig
+    gui?.controllersRecursive().forEach((ctl) => ctl.updateDisplay());
+  }
 
   // dome radius has to clear the ocean's outer ring; it rides with the camera so
   // the gradient stays centred however far you fly
@@ -126,7 +149,7 @@ async function main() {
   scene.add(skyDome);
 
   // distance haze — the far ocean fades into the exact sky value behind it
-  scene.fogNode = createAerialPerspective(shading);
+  scene.fogNode = createAerialPerspective(shading, { density: shading.hazeAir });
 
   // The baked fbm is now needed by the simulation as well as the surface — the
   // break stencil in maps.js samples it — so it has to exist before the Ocean.
@@ -147,23 +170,13 @@ async function main() {
   oceanMesh.frustumCulled = false;
   scene.add(oceanMesh);
 
-  // debug views
-  const debug = createDebugView();
-  const spectrumMats = ocean.cascades.map((cc) => spectrumDebugMaterial(cc.h0, params.N, { exposure: 0.12 }));
-  const heightHeatmap = spectrumDebugMaterial(ocean.cascades[0].DyDxz, params.N, { exposure: 0.5 });
-
-  if (!shot) createGUI(params, { ocean, shading, updateSun });
+  const gui = shot ? null : createGUI(params, { ocean, shading, updateSun });
   if (!shot) createPaletteSwitch(params, shading.palette);
+  if (!shot) createSkySwitch(params, applySkyLive);
 
-  let view = 'fft';
   addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase();
-    if (k === 'f') view = 'fft';
-    else if (k === '1') view = 'spectrum0';
-    else if (k === '2' && ocean.cascades[1]) view = 'spectrum1';
-    else if (k === '3' && ocean.cascades[2]) view = 'spectrum2';
-    else if (k === '5') view = 'height';
-    else if (k === '=' || k === '+') ocean.lambda.value = Math.min(ocean.lambda.value + 0.1, 3);
+    if (k === '=' || k === '+') ocean.lambda.value = Math.min(ocean.lambda.value + 0.1, 3);
     else if (k === '-' || k === '_') ocean.lambda.value = Math.max(ocean.lambda.value - 0.1, 0);
   });
 
@@ -218,16 +231,7 @@ async function main() {
     step(dt);
     fly.update(dt);
 
-    if (view === 'fft') {
-      renderer.render(scene, camera);
-    } else {
-      debug.mesh.material =
-        view === 'spectrum0' ? spectrumMats[0]
-          : view === 'spectrum1' ? spectrumMats[1]
-            : view === 'spectrum2' ? spectrumMats[2]
-              : heightHeatmap;
-      renderer.render(debug.scene, debug.camera);
-    }
+    renderer.render(scene, camera);
 
     emaWall = emaWall * 0.9 + dt * 1000 * 0.1;
     hudAccum += dt;
@@ -243,7 +247,6 @@ async function main() {
         `step 6 · foam · N=${params.N} · ${ocean.cascades.length} cascades · choppiness λ=${ocean.lambda.value.toFixed(2)} (+/-)\n` +
         `grid: ${(grid.vertexCount / 1000).toFixed(0)}k verts radial · ${(grid.outerRadius / 1000).toFixed(1)} km reach\n` +
         `fly: hold RMB to look · WASD · Q/E down/up · shift boost · wheel speed (${fly.speed.toFixed(0)} m/s)\n` +
-        `view: ${view}   (F = ocean, 5 = height map, 1/2/3 = spectra)\n` +
         fftStr,
       );
     }

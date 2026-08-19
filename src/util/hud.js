@@ -34,6 +34,41 @@ const SEAS = [
   { id: 1, name: 'open-ocean blue', from: '#1a3342', to: '#6c9eb4' },
 ];
 
+// Which sky. Same two-chip pattern as the sea palette: the presets are two
+// different lighting rigs, not points on a slider. Chips are gradients from
+// each sky's zenith down to its horizon.
+const SKY_CHIPS = [
+  { id: 'midday', name: 'midday', from: '#c2d5eb', to: '#356ace' },
+  { id: 'golden', name: 'golden hour', from: '#e8b27a', to: '#7a6f96' },
+];
+
+export function createSkySwitch(params, onSelect) {
+  const bar = document.createElement('div');
+  bar.id = 'sky';
+  const chips = SKY_CHIPS.map((s) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.title = 'Sky: ' + s.name;
+    b.setAttribute('aria-label', 'Sky: ' + s.name);
+    b.style.background = 'linear-gradient(180deg, ' + s.to + ', ' + s.from + ')';
+    b.addEventListener('click', () => select(s.id));
+    bar.append(b);
+    return b;
+  });
+
+  const mark = () =>
+    chips.forEach((b, i) => b.setAttribute('aria-pressed', String(SKY_CHIPS[i].id === params.sky)));
+
+  function select(id) {
+    onSelect(id);
+    mark();
+  }
+  mark();
+
+  document.body.append(bar);
+  return { select };
+}
+
 export function createPaletteSwitch(params, uniformNode) {
   const bar = document.createElement('div');
   bar.id = 'palette';
