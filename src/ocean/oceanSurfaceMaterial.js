@@ -5,13 +5,26 @@ import {
   length, fwidth, sqrt, exp, log2, PI,
 } from 'three/tsl';
 import { skyColor } from './sky.js';
-import { foamShading, ampEnvelope } from './foamShading.js';
 import { diffusionAttenuation } from './water.js';
 
 // --- look constants, local to this file -----------------------------------
 // params.js and the GUI belong to the integration pass; only the palette and
 // the two strength knobs arrive as uniforms. Everything that shapes the water
 // itself is tuned here so the whole model stays readable in one place.
+
+// World-anchored km-scale amplitude envelope. An FFT sea is periodic by
+// construction — cascade 0 repeats every 1024 m, the chop tile every 144 m —
+// and from altitude the same neighbourhood marches across the frame. A
+// compute texel IS every repeat of itself at once, so the variation has to
+// live in world-anchored rendering: two octaves (2400 m and 770 m, both
+// incommensurate with the tile periods) scale displacement, normals and foam
+// per WORLD position. Mean 1, clamped to +/-40%. Wave groupiness at km scale
+// is also simply true of real seas.
+const ampEnvelope = (detailTex, uv) => {
+  const a = texture(detailTex, uv.div(2400)).level(0).b;
+  const b = texture(detailTex, uv.div(770).add(0.37)).level(0).a;
+  return a.sub(0.4089).mul(1.35).add(b.sub(0.4089).mul(0.75)).add(1).clamp(0.6, 1.4);
+};
 
 // --- the air/water interface, done once and used three times ---------------
 // Refractive index of sea water at 35 PSU, 589 nm (Quan & Fry 1995). Every
@@ -478,79 +491,6 @@ const SAT_BOOST = [1.12, 1.00];
 // draws the glitter path, and accumulated-Jacobian foam whitens breaking crests.
 // A baked tiling noise texture, differenced for its gradient, adds capillary
 // ripple below the finest cascade.
-// --- bubble plume ----------------------------------------------------------
-// Foam does not fade into water. It fades into a milky, brighter, greener patch
-// of water that extends BEYOND the visible foam and outlives it: a breaking
-// crest injects a plume of bubbles metres deep, 50-100 um bubbles dominate the
-// backscatter, and radiometers see the plume where a photograph shows no
-// whitecap at all. Rendering the foam mask alone and letting it fade to nothing
-// is most of why a dying whitecap here reads as an arbitrary dissolve rather
-// than as a process finishing.
-//
-// Read from cascade 0's lace channel at a deliberately coarse mip, so the halo
-// is wider and softer than the foam drawn on top of it. The colour is bubble
-// backscatter — spectrally flat — times the round-trip absorption of about a
-// metre of water at a = (0.34, 0.057, 0.009) 1/m, which is what turns a white
-// scatterer into the pale green a whitecap's wake actually is.
-//
-// ADDED to the body, never lerped into it: a lerp would replace the water and
-// read as fog lying on the surface. And kept small — this is the only foam term
-// with no threshold, no group mask and no opacity ceiling, so it is the one that
-// can quietly turn the whole sea to milk.
-// Sized from reference rather than from caution. In photographs of a real
-// breaking sea the submerged cloud is not a hint — it is often the largest pale
-// feature in the frame, covering more area than the white surface foam and
-// reaching well outside it, because the plume spans 1.5-3x the surface patch's
-// plan area and outlives it by as much again. The first pass here was set at a
-// gain of 0.15 over an 8 m radius, which is a whisper, and the frame it was
-// tuned against had almost no visible plume at all.
-//
-// The colour is no longer an authored swatch. It was (0.62, 0.92, 0.99) —
-// derived from Pope & Fry pure water, i.e. Jerlov IB, which is a water type
-// nothing else in this project models, and it came out BLUE-peaked. Bubble
-// backscatter is spectrally flat, so what leaves the plume is that flat source
-// times the round-trip attenuation of the water above it — and taken through
-// this file's own muWater (Jerlov 1C-3C, from water.js) that is GREEN-peaked
-// jade, not cyan. Computed per pixel below, so a patch of water the mass wander
-// has painted clearer also gets a clearer-looking plume: one noise field, three
-// consistent consequences.
-//
-// REWORKED, in three ways that are each a structure change and not a gain:
-//
-//   SOURCE  it reads the dedicated aeration accumulator (foamMap2.y — tau
-//           30-120 s in maps.js), not the lace channel. Slaving the plume to
-//           lace's ~5 s lifetime was the deepest of the three faults: real
-//           plumes are the LONGEST-lived stage of the lifecycle, visible for
-//           >50 wave periods, which is why the reference's near field is
-//           mostly plume with a web of foam on top.
-//   KNEE    the accumulator is taken through a/(a+k) before the gain, so
-//           recently-broken water reaches near-full milkiness instead of the
-//           source's small linear value whispering through: the old peak
-//           worked out at ~0.05 linear against the reference's 0.4-0.6.
-//   FRESNEL aeration suppresses the Fresnel mix (see AER_FRES at use). The
-//           old plume sat wholly on the transmitted side, so the distance-
-//           keyed grazing release erased it exactly where a deck camera sees
-//           the reference's plume dominate. Aerated water is not a clean
-//           dielectric mirror.
-const PLUME_RADIUS = 14.0; // m of lateral spread, as a mip level below
-const PLUME_DEPTH = 0.85; // m of water the backscatter travels back up through
-const PLUME_KNEE = 0.14; // accumulator value at half milkiness
-const PLUME_GAIN = 0.62; // peak plume ~0.21/0.39/0.34 linear through 1C water
-const PLUME_PARALLAX = 1.2; // m of nominal depth for the view-parallax tap
-const AER_FRES = 0.30; // how much full aeration suppresses the mirror
-// Foam feeding back into the water BRDF — the fix for foam printing as grey
-// glossy sheen. Every surveyed production ocean does this (Atlas, gasgiant,
-// Godot): foam-covered water is matte, so coverage raises roughness and pulls
-// both Fresnel terms down BEFORE the specular lobe and sky mirror are built,
-// and the final alpha lerp then lays matte foam over matte water instead of
-// translucent foam over a mirror.
-const FOAM_ROUGH = 0.78;
-const FOAM_FRES = 0.92; // sky-mirror suppression at full presence
-// Sun glint DIES on foam — a bubble raft has no coherent facet to mirror the
-// disc, and neither does the churned water in its holes. The kill runs on the
-// PRE-erosion presence and saturates by ~45% presence, so even thin lace
-// carries no sparkle; clean water between separate rafts keeps its glint.
-const FOAM_SPEC_KILL = 2.2;
 // Specular anti-aliasing: where the normal varies fast inside one pixel
 // (contour-grazing wave outlines), the GGX lobe both widens and desaturates,
 // which removes the warm per-pixel speckle that traced wave contours in the
@@ -674,41 +614,6 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     const viewDist = length(cameraPosition.sub(positionWorld)).toVar();
     const NoV = saturate(dot(N, V)).toVar();
 
-    // --- foam & aeration, BEFORE the BRDF -----------------------------------
-    // Foam appearance lives in foamShading.js, but it is evaluated here, ahead
-    // of Fresnel and the specular lobe, because its coverage has to feed BACK
-    // into the water's BRDF — see FOAM_ROUGH. The old arrangement built the
-    // full-gloss water first and alpha-lerped foam over the finished pixel, so
-    // every partial-opacity residual patch was 40-75% clean-water mirror:
-    // grey sheen, not matte white.
-    const foam = foamShading({ cascades, lengthScales, worldXZ, shading, detailTex, N });
-    const fcov = foam.coverage.toVar();
-    // pre-erosion opacity: the BRDF must stay matte inside a raft's holes too
-    const pres = foam.presence.toVar();
-    // Aeration under this pixel: a coarse-mip base tap plus a view-parallax
-    // tap at a nominal depth, so the plume reads as a submerged volume that
-    // slides against the surface instead of as paint on it.
-    const aer = float(0).toVar();
-    if (cascades[0]?.foamMap2) {
-      const L0 = lengthScales[0];
-      const texel0 = L0 / cascades[0].N;
-      const lodP = log2(footprint.div(texel0)).max(float(Math.log2(Math.max(PLUME_RADIUS / texel0, 1)))).toVar();
-      const pOff = V.xz.mul(PLUME_PARALLAX).div(max(V.y, float(0.2)));
-      const a0 = texture(cascades[0].foamMap2, worldXZ.div(L0)).level(lodP).y;
-      const a1 = texture(cascades[0].foamMap2, worldXZ.sub(pOff).div(L0)).level(lodP).y;
-      // the plume follows the same macro energy as the foam that made it
-      aer.assign(a0.add(a1).mul(0.5).mul(envC).mul(envC));
-    }
-    const plK = aer.div(aer.add(float(PLUME_KNEE))).toVar();
-    // Foam-covered water is matte — see FOAM_ROUGH. Applied after the
-    // ROUGH_MAX clamp on purpose: foam may exceed the clean-water ceiling.
-    rough.assign(max(rough, pres.mul(FOAM_ROUGH)));
-
-    // The exact dielectric Fresnel — see fresnelDielectric. What was here was
-    // Schlick with a roughness-dependent exponent, `mix(5, 3.4, rough)`, bending
-    // the curve to fix an error Schlick makes at grazing; it overshot instead,
-    // by 30% at 78.8 degrees, which is where a deck camera spends most of its
-    // frame. Exact costs about nine more ALU and needs no bending.
     const fres = fresnelDielectric(NoV, float(ETA_AW)).toVar();
     // Kept before the art direction below touches it, because the sun glitter
     // has to ride on the REAL reflection coefficient. REFL_NEAR is a hold-back
@@ -730,14 +635,6 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // the far band keeps its own hue, and it is what puts a colour difference
     // under the horizon line instead of a value difference alone.
     fres.assign(min(fres, float(REFL_CEIL)));
-    // Foam and aeration both break the clean dielectric interface: foam is a
-    // diffuse solid, aerated water a scattering suspension. Suppressing the
-    // mirror here — including at the grazing angles the distance release just
-    // opened — is what lets the plume and the matte foam survive a deck-height
-    // framing, which is exactly where the reference shows them dominating.
-    fres.mulAssign(float(1).sub(pres.mul(float(FOAM_FRES))));
-    fres.mulAssign(float(1).sub(plK.mul(float(AER_FRES))));
-    fresSpec.mulAssign(saturate(float(1).sub(pres.mul(float(FOAM_SPEC_KILL)))));
 
     // --- sky reflection -----------------------------------------------------
     // As roughness rises the mirror ray relaxes toward the flat-water direction,
@@ -1085,14 +982,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // the glow at exactly the wrong moment; exact Fresnel is 0.31 there, so
     // there is nothing left to compensate for. The floor goes with it — REFL_CEIL
     // already guarantees the sea keeps 14% of its own colour in the mix.
-    // Bubble plume under and around a break — see PLUME_RADIUS. On the
-    // transmitted side of the Fresnel split with the rest of the water, because
-    // that is where it physically is: light scattered back out of the water
-    // column, not off the surface.
-    // Bubble backscatter through the round trip of the water above it, driven
-    // by the knee-saturated aeration read up top — see the PLUME_KNEE block.
-    const plume = exp(muWater.mul(-2 * PLUME_DEPTH)).mul(plK.mul(float(PLUME_GAIN))).toVar();
-    const water = mix(body.add(glow).add(plume), refl, fres).toVar();
+    const water = mix(body.add(glow), refl, fres).toVar();
     // A deliberate chroma push, on the water and nothing else — see SAT_BOOST.
     // It sits here rather than on the finished pixel because foam and glitter
     // are white by intent, and extrapolating a white away from its own luminance
@@ -1139,9 +1029,26 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     const glint = max(ggx.sub(float(1.5)), float(0)).toVar();
     water.addAssign(specTint.mul(glint.div(glint.add(6)).mul(0.5 * SPEC_MAX).mul(shading.specBoost)).mul(fresSpec));
 
-    // foam over the water — evaluated up top so its coverage could shape the
-    // BRDF; composited here, over everything that comes out of the water
-    const surface = mix(water, foam.color, foam.coverage).toVar();
+    // foam on real crest-folds only (skip the finest cascade's constant
+    // speckle): the accumulated-Jacobian turbulence rides displacement.w
+    const foamRaw = float(0).toVar();
+    cascades.forEach((c, i) => {
+      if (i >= cascades.length - 1) return;
+      const turb = texture(c.displacement, worldXZ.div(lengthScales[i])).w;
+      foamRaw.addAssign(saturate(shading.foamThreshold.sub(turb).mul(shading.foamScale)));
+    });
+    // the macro envelope keeps tile copies from foaming identically
+    const coverage = smoothstep(float(0.2), float(0.9), foamRaw.mul(envC).mul(envC)).toVar();
+
+    // bubbly structure: modulate foam BRIGHTNESS with the noise texture at two
+    // scrolling scales (never carve coverage -> no dots), then shade the foam
+    // as a near-Lambertian surface lit by sun + sky
+    const fb1 = texture(detailTex, worldXZ.mul(0.45).add(vec2(t.mul(0.03), t.mul(0.02)))).b;
+    const fb2 = texture(detailTex, worldXZ.mul(1.6).add(vec2(t.mul(-0.05), t.mul(0.04)))).a;
+    const bubbles = saturate(fb1.mul(0.7).add(fb2.mul(0.5)).add(0.2));
+    const foamLight = float(0.55).add(saturate(dot(N, shading.sunDir)).mul(0.6));
+    const foamShaded = vec3(shading.foamColor).mul(foamLight).mul(bubbles);
+    const surface = mix(water, foamShaded, coverage).toVar();
 
     // A crest can swallow a deck-height camera. The sheet is DoubleSide, so that
     // frame is drawn from underneath — and looking UP through water is the one
