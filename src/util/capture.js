@@ -8,14 +8,19 @@
 export const PRESETS = {
   // signature Sea of Thieves shot: eye just above the water, horizon centred
   deck: { pos: [0, 3.2, 60], target: [0, 2.0, -40], fov: 65 },
+  // the reference photograph's viewpoint: a ship's rail ~9 m up, looking
+  // slightly down across the near field with the horizon in the upper third
+  rail: { pos: [0, 9, 40], target: [0, 0.5, -90], fov: 62 },
+  // low and steep over the near surface — texture inspection: tiling repeats
+  // and carve microstructure have nowhere to hide at this range
+  close: { pos: [0, 7, 10], target: [14, -2, -22], fov: 60 },
   // mid-height survey of the wave field
   swell: { pos: [0, 16, 68], target: [0, 2, -20], fov: 55 },
   // down in a trough looking up at an oncoming crest
   trough: { pos: [-30, 1.4, 20], target: [10, 6, -25], fov: 70 },
-  // straight down the sun vector — az 122.8 / el 11.2, matching the baked sky.
-  // Re-derive from SKY_SUN if the panorama is swapped, or this stops being the
-  // glitter-path shot.
-  sun: { pos: [0, 6, 0], target: [82.5, 25.4, -53.1], fov: 60 },
+  // down the sun's azimuth, whatever sky is active — aimCamera resolves the
+  // target from params, with the elevation capped so the sea stays in frame.
+  sun: { pos: [0, 6, 0], sunChase: true, fov: 60 },
   // away from the sun — tests body colour + SSS without specular help
   away: { pos: [0, 6, 0], target: [-82.5, 16, 53.1], fov: 60 },
   // under the surface looking up: the only framing that exercises Snell's
@@ -62,9 +67,22 @@ export function applyOverrides(params, overrides) {
   }
 }
 
-export function aimCamera(camera, preset) {
+export function aimCamera(camera, preset, params) {
   camera.position.fromArray(preset.pos);
   camera.fov = preset.fov;
   camera.updateProjectionMatrix();
+  if (preset.sunChase && params) {
+    // aim along the live sun azimuth at a capped elevation: the glitter path
+    // lives on the water BELOW the disc, and chasing a 50-degree midday sun
+    // with the lens would frame nothing but sky
+    const az = (params.sunAzimuth * Math.PI) / 180;
+    const el = Math.min((params.sunElevation * Math.PI) / 180, 0.30);
+    camera.lookAt(
+      preset.pos[0] + Math.cos(el) * Math.sin(az) * 100,
+      preset.pos[1] + Math.sin(el) * 100,
+      preset.pos[2] + Math.cos(el) * Math.cos(az) * 100,
+    );
+    return;
+  }
   camera.lookAt(...preset.target);
 }
