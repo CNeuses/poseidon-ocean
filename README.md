@@ -99,20 +99,6 @@ bottom-left switch sea palette (tropical green ↔ open-ocean blue) and sky rig
 - ~790k-vertex radial grid recentred on the camera: dense underfoot, sparse at 20 km, so
   the water runs to a real horizon
 
-## Screenshots
-
-Every image above is reproducible. Start the dev server, then:
-
-```bash
-node tools/shot.mjs --out shots/readme --presets rail,sun,trough,close,aerial --t 40 --fmt jpeg
-node tools/shot.mjs --out shots/golden --presets rail --p '{"sky":"golden"}'
-node tools/shot.mjs --out shots/calm   --presets rail --p '{"local":{"windSpeed":6}}'
-```
-
-It drives headless Chrome, fast-forwards the sim on a fixed timestep, and writes one frame
-per camera preset — see `src/util/capture.js` for the preset list and the `?shot=1` URL
-parameters it reads.
-
 ## Credits
 
 Spectrum and FFT techniques adapted from [gasgiant/FFT-Ocean](https://github.com/gasgiant/FFT-Ocean)
