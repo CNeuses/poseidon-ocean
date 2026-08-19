@@ -1,7 +1,7 @@
 <h1 align="center">Poseidon</h1>
 
 <p align="center">
-  A real-time Tessendorf ocean in <a href="https://threejs.org/">Three.js</a> — three cascades of
+  A real-time Tessendorf ocean in <a href="https://threejs.org/">Three.js</a>: three cascades of
   inverse FFT running as WebGPU compute shaders, shaded with measured water optics.
 </p>
 
@@ -20,7 +20,7 @@ npm install
 npm run dev
 ```
 
-Open the printed URL. **WebGPU only — there is no WebGL fallback**: Chrome/Edge 113+ or
+Open the printed URL. **WebGPU only, with no WebGL fallback**: Chrome/Edge 113+ or
 Safari 18+. If the page reports WebGPU as unavailable on a machine that should have it,
 `chrome://flags/#enable-unsafe-webgpu` is the usual culprit.
 
@@ -60,7 +60,7 @@ bottom-left switch sea palette (tropical green ↔ open-ocean blue) and sky rig
     <td><img src="docs/img/wavefield.jpg" alt="The wave field seen from 90 m up"></td>
   </tr>
   <tr>
-    <td><b>Subsurface scatter.</b> A thin lip goes warm, a thick one jade — one exponential over a refracted path.</td>
+    <td><b>Subsurface scatter.</b> A thin lip goes warm, a thick one jade, off one exponential over a refracted path.</td>
     <td><b>Wave field.</b> Three cascades on disjoint wavenumber bands: swell and ripple without visible tiling.</td>
   </tr>
   <tr>
@@ -81,7 +81,7 @@ bottom-left switch sea palette (tropical green ↔ open-ocean blue) and sky rig
 - 3 wave cascades (1024 / 144 / 24 m patches) on disjoint wavenumber bands
 - JONSWAP/Horvath directional spectrum: wind sea + swell, TMA depth correction,
   Donelan–Banner spreading
-- Wavenumber-weighted choppy displacement — full strength on the swell, rolled off on the
+- Wavenumber-weighted choppy displacement: full strength on the swell, rolled off on the
   chop, so crests get sculpted without pinching the ripples
 - Foam from the displacement Jacobian, accumulated with build/decay, its coverage targeted
   at the Monahan & O'Muircheartaigh whitecap fraction for the current wind speed
@@ -89,7 +89,7 @@ bottom-left switch sea palette (tropical green ↔ open-ocean blue) and sky rig
 **Shading**
 
 - Exact dielectric Fresnel (n = 1.34) both ways across the interface, so a submerged camera
-  gets a real Snell's window — the whole sky inside a 48.3° cone — with total internal
+  gets a real Snell's window (the whole sky inside a 48.3° cone) with total internal
   reflection outside it
 - Subsurface scatter built from the three factors it actually has: entry Fresnel on the
   wave's far face, a Henyey–Greenstein forward lobe for the exit, and diffusion
@@ -110,4 +110,4 @@ tabulated by Solonenko & Mobley 2015,
 [*Inherent optical properties of Jerlov water types*](https://doi.org/10.1364/AO.54.005392),
 Appl. Opt. 54(17):5392.
 
-MIT licensed — see [LICENSE](LICENSE).
+MIT licensed. See [LICENSE](LICENSE).
