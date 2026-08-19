@@ -28,6 +28,8 @@ const { values: a } = parseArgs({
     url: { type: 'string', default: 'http://localhost:5173' },
     w: { type: 'string', default: '1600' },
     h: { type: 'string', default: '900' },
+    fmt: { type: 'string', default: 'png' }, // png | jpeg — jpeg for README-sized files
+    q: { type: 'string', default: '90' }, // jpeg quality
   },
 });
 
@@ -100,8 +102,8 @@ for (const preset of presets) {
     ok = false;
     errors.push('timeout waiting for __shotReady');
   }
-  const file = `${out}/${preset}.png`;
-  await page.screenshot({ path: file });
+  const file = `${out}/${preset}.${a.fmt === 'jpeg' ? 'jpg' : 'png'}`;
+  await page.screenshot({ path: file, type: a.fmt, ...(a.fmt === 'jpeg' ? { quality: Number(a.q) } : {}) });
   results.push({ preset, file, ok, errors: errors.slice(0, 6) });
   await page.close();
 }

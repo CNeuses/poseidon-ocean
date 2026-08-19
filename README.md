@@ -1,24 +1,17 @@
-# Poseidon
+<h1 align="center">Poseidon</h1>
 
-Real-time Tessendorf-style ocean in [Three.js](https://threejs.org/) (WebGPURenderer + TSL). The inverse FFT runs in WebGPU compute shaders.
+<p align="center">
+  A real-time Tessendorf ocean in <a href="https://threejs.org/">Three.js</a> — three cascades of
+  inverse FFT running as WebGPU compute shaders, shaded with measured water optics.
+</p>
 
-## What's in it
+<p align="center">
+  <img alt="WebGPU" src="https://img.shields.io/badge/WebGPU-compute-005a9c">
+  <img alt="three.js" src="https://img.shields.io/badge/three.js-0.184-000000">
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-blue">
+</p>
 
-- Stockham butterfly IFFT on the GPU, with precomputed twiddle/index buffers
-- 3 wave cascades (250 / 17 / 5 m) on disjoint wavenumber bands, so you get swell and ripples without visible tiling
-- JONSWAP/Horvath directional spectrum: wind sea + swell, TMA depth correction, Donelan-Banner spreading
-- Choppy horizontal displacement, normals from the slope FFTs
-- Foam from the displacement Jacobian, with build/decay accumulation so whitecaps linger a bit before fading
-- Exact dielectric Fresnel (n = 1.34) both ways across the interface, so a
-  submerged camera gets a real Snell's window — the whole sky inside a 48.3°
-  cone — with total internal reflection outside it
-- Subsurface scatter built from the three factors it actually has: entry Fresnel
-  on the wave's far face, a Henyey-Greenstein forward lobe for the exit, and
-  diffusion transmittance over a refracted path, so a thin lip goes warm and a
-  thick one goes jade off one exponential
-- Sun glitter (GGX with a knee), accumulated-Jacobian whitecaps, self-composited
-  aerial perspective
-- lil-gui panel for live tuning (wind, choppiness, foam, sun, colors)
+![Golden-hour sea from a ship's rail](docs/img/hero.jpg)
 
 ## Run
 
@@ -27,15 +20,108 @@ npm install
 npm run dev
 ```
 
-Open the printed URL in a WebGPU-capable browser (Chrome/Edge 113+, Safari 18+). WebGPU only, no WebGL fallback.
+Open the printed URL. **WebGPU only — there is no WebGL fallback**: Chrome/Edge 113+ or
+Safari 18+. If the page reports WebGPU as unavailable on a machine that should have it,
+`chrome://flags/#enable-unsafe-webgpu` is the usual culprit.
 
-Camera is an Unreal-style free look: hold right mouse to look, `WASD` to fly,
-`Q`/`E` down/up, shift to boost, mouse wheel sets speed.
+`npm run build` / `npm run preview` produce and serve a static bundle.
 
-Views: `F` ocean, `5` height map, `1/2/3` cascade spectra. `+`/`-` choppiness.
+## Controls
+
+The camera is an Unreal-style free look.
+
+| Input | Action |
+| --- | --- |
+| Hold **right mouse** | Look around |
+| **W A S D** | Fly along the view direction |
+| **Q** / **E** | Down / up (world space) |
+| **Shift** | 4× boost |
+| **Mouse wheel** | Fly speed |
+| **+** / **−** | Choppiness λ |
+
+The panel on the right tunes sea state (wind speed and direction, amplitude, directionality,
+time scale), foam, surface detail and subsurface strength, and the sun. The chips in the
+bottom-left switch sea palette (tropical green ↔ open-ocean blue) and sky rig
+(midday ↔ golden hour) live.
+
+## The look
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/img/glitter.jpg" alt="Sun glitter path at golden hour"></td>
+    <td width="50%"><img src="docs/img/whitecaps.jpg" alt="Whitecaps across the near field"></td>
+  </tr>
+  <tr>
+    <td><b>Sun glitter.</b> GGX with a knee, over a sun reconstructed from the panorama's clipped disc.</td>
+    <td><b>Whitecaps.</b> Foam where the displacement Jacobian folds, with build/decay so caps linger and streak downwind.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/img/subsurface.jpg" alt="A crest lit from behind, glowing green"></td>
+    <td><img src="docs/img/wavefield.jpg" alt="The wave field seen from 90 m up"></td>
+  </tr>
+  <tr>
+    <td><b>Subsurface scatter.</b> A thin lip goes warm, a thick one jade — one exponential over a refracted path.</td>
+    <td><b>Wave field.</b> Three cascades on disjoint wavenumber bands: swell and ripple without visible tiling.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/img/sea-blue.jpg" alt="Open-ocean blue palette"></td>
+    <td><img src="docs/img/sea-green.jpg" alt="Tropical green palette"></td>
+  </tr>
+  <tr>
+    <td><b>Open-ocean blue.</b> Jerlov absorption and scattering, not a tinted swatch.</td>
+    <td><b>Tropical green.</b> Same water model, different inherent optical properties.</td>
+  </tr>
+</table>
+
+## What's in it
+
+**Simulation**
+
+- Stockham butterfly IFFT on the GPU, with precomputed twiddle/index buffers
+- 3 wave cascades (1024 / 144 / 24 m patches) on disjoint wavenumber bands
+- JONSWAP/Horvath directional spectrum: wind sea + swell, TMA depth correction,
+  Donelan–Banner spreading
+- Wavenumber-weighted choppy displacement — full strength on the swell, rolled off on the
+  chop, so crests get sculpted without pinching the ripples
+- Foam from the displacement Jacobian, accumulated with build/decay, its coverage targeted
+  at the Monahan & O'Muircheartaigh whitecap fraction for the current wind speed
+
+**Shading**
+
+- Exact dielectric Fresnel (n = 1.34) both ways across the interface, so a submerged camera
+  gets a real Snell's window — the whole sky inside a 48.3° cone — with total internal
+  reflection outside it
+- Subsurface scatter built from the three factors it actually has: entry Fresnel on the
+  wave's far face, a Henyey–Greenstein forward lobe for the exit, and diffusion
+  transmittance over a refracted path
+- Sun glitter (GGX with a knee) and self-composited aerial perspective
+- Two sky rigs, each carrying its own measured sun colour, intensity, and haze extinction
+- ~790k-vertex radial grid recentred on the camera: dense underfoot, sparse at 20 km, so
+  the water runs to a real horizon
+
+## Screenshots
+
+Every image above is reproducible. Start the dev server, then:
+
+```bash
+node tools/shot.mjs --out shots/readme --presets rail,sun,trough,close,aerial --t 40 --fmt jpeg
+node tools/shot.mjs --out shots/golden --presets rail --p '{"sky":"golden"}'
+node tools/shot.mjs --out shots/calm   --presets rail --p '{"local":{"windSpeed":6}}'
+```
+
+It drives headless Chrome, fast-forwards the sim on a fixed timestep, and writes one frame
+per camera preset — see `src/util/capture.js` for the preset list and the `?shot=1` URL
+parameters it reads.
 
 ## Credits
 
-Spectrum and FFT techniques adapted from [gasgiant/FFT-Ocean](https://github.com/gasgiant/FFT-Ocean) (MIT), based on Tessendorf 2001 (*Simulating Ocean Water*) and Horvath 2015 (*Empirical Directional Wave Spectra for Computer Graphics*).
+Spectrum and FFT techniques adapted from [gasgiant/FFT-Ocean](https://github.com/gasgiant/FFT-Ocean)
+(MIT), based on Tessendorf 2001 (*Simulating Ocean Water*) and Horvath 2015
+(*Empirical Directional Wave Spectra for Computer Graphics*).
 
-Water optics (`src/ocean/water.js`) use the Jerlov coastal-water inherent optical properties tabulated by Solonenko & Mobley 2015, [*Inherent optical properties of Jerlov water types*](https://doi.org/10.1364/AO.54.005392), Appl. Opt. 54(17):5392.
+Water optics (`src/ocean/water.js`) use the Jerlov coastal-water inherent optical properties
+tabulated by Solonenko & Mobley 2015,
+[*Inherent optical properties of Jerlov water types*](https://doi.org/10.1364/AO.54.005392),
+Appl. Opt. 54(17):5392.
+
+MIT licensed — see [LICENSE](LICENSE).
