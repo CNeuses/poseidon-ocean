@@ -110,4 +110,7 @@ tabulated by Solonenko & Mobley 2015,
 [*Inherent optical properties of Jerlov water types*](https://doi.org/10.1364/AO.54.005392),
 Appl. Opt. 54(17):5392.
 
-MIT licensed. See [LICENSE](LICENSE).
+The golden-hour sky panorama (`public/sky/sky_131_2k.png`) is
+[Skybox 131](https://freestylized.com/skybox/sky_131/) by
+[FreeStylized](https://freestylized.com/), used under their custom CC0 license
+rather than this project's.
