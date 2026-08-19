@@ -1038,16 +1038,24 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
       foamRaw.addAssign(saturate(shading.foamThreshold.sub(turb).mul(shading.foamScale)));
     });
     // the macro envelope keeps tile copies from foaming identically
-    const coverage = smoothstep(float(0.2), float(0.9), foamRaw.mul(envC).mul(envC)).toVar();
+    const cov = saturate(foamRaw.mul(envC).mul(envC)).toVar();
 
-    // bubbly structure: modulate foam BRIGHTNESS with the noise texture at two
-    // scrolling scales (never carve coverage -> no dots), then shade the foam
-    // as a near-Lambertian surface lit by sun + sky
-    const fb1 = texture(detailTex, worldXZ.mul(0.45).add(vec2(t.mul(0.03), t.mul(0.02)))).b;
-    const fb2 = texture(detailTex, worldXZ.mul(1.6).add(vec2(t.mul(-0.05), t.mul(0.04)))).a;
-    const bubbles = saturate(fb1.mul(0.7).add(fb2.mul(0.5)).add(0.2));
+    // fbm-carved mask, the classic dissolve: the threshold rides the coverage,
+    // so foam is born as lacy fbm islands on a fresh fold, merges toward a
+    // solid cap as coverage rises, and dies back into lace as the turbulence
+    // recovers. Two scales of the baked fbm (17 m and 3.4 m), slowly drifting.
+    const fA = texture(detailTex, worldXZ.div(17).add(vec2(t.mul(0.012), t.mul(0.008)))).b;
+    const fB = texture(detailTex, worldXZ.div(3.4).add(vec2(t.mul(-0.02), t.mul(0.015)))).a;
+    const fbm = fA.mul(0.62).add(fB.mul(0.38)).toVar();
+    const fEdge = float(0.60).sub(cov.mul(0.42)).toVar();
+    const coverage = smoothstep(fEdge, fEdge.add(0.15), fbm)
+      .mul(saturate(cov.mul(2.4))).toVar();
+
+    // lit as a near-Lambertian surface, with a little of the coarse fbm left
+    // in the brightness so a cap reads as a raft rather than flat paint
     const foamLight = float(0.55).add(saturate(dot(N, shading.sunDir)).mul(0.6));
-    const foamShaded = vec3(shading.foamColor).mul(foamLight).mul(bubbles);
+    const foamShaded = vec3(shading.foamColor).mul(foamLight)
+      .mul(fA.mul(0.55).add(0.78));
     const surface = mix(water, foamShaded, coverage).toVar();
 
     // A crest can swallow a deck-height camera. The sheet is DoubleSide, so that
