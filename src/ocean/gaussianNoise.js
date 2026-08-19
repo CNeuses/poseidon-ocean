@@ -16,7 +16,7 @@
 // mulberry32: 4 lines, no dependency, and passes enough of gjrand for noise
 // this is only ever fed through a Box-Muller transform. Pass a different seed
 // to get a different ocean on purpose rather than by accident.
-// ponytail: not crypto, not a distribution to defend — it seeds a wave field.
+// Not crypto, not a distribution to defend — it seeds a wave field.
 function mulberry32(a) {
   return () => {
     a = (a + 0x6d2b79f5) | 0;

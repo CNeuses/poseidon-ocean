@@ -597,7 +597,7 @@ export function createCascadeMaps(cascade, {
     // neighbour reads on a buffer already in registers, with wraparound, which
     // the periodic tile makes exact.
     //
-    // ponytail: reads neighbours from the buffer this pass also writes, so a
+    // Reads neighbours from the buffer this pass also writes, so a
     // neighbour may be pre- or post-update depending on scheduling. That makes
     // this Gauss-Seidel rather than Jacobi — order-dependent by at most one
     // frame of diffusion, which is invisible at this coefficient and stable well

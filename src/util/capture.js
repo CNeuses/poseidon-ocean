@@ -2,7 +2,7 @@
 // screenshots across iterations. `?shot=1&preset=deck&t=40` runs the sim on a
 // fixed timestep to t seconds, renders one frame, then flags window.__shotReady.
 //
-// ponytail: URL params, not a config file — the shot script already builds URLs.
+// URL params, not a config file — the shot script already builds URLs.
 
 // pos + target in world space. Ocean is at y=0, wind blows toward +x/+z (45deg).
 export const PRESETS = {

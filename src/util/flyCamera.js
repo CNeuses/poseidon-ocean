@@ -6,7 +6,7 @@ const MAX_PITCH = Math.PI / 2 - 0.01;
 // (along the view direction, pitch included), Q/E down/up, shift to boost,
 // wheel to change fly speed.
 //
-// ponytail: not addons/FlyControls — it rolls the horizon on Q/E (fatal when
+// Not addons/FlyControls — it rolls the horizon on Q/E (fatal when
 // the horizon is the whole shot) and binds R/F, colliding with the F
 // debug-view key. Yaw/pitch only, so the horizon stays level.
 export function createFlyCamera(camera, dom, { speed = 25, lookSpeed = 0.0022 } = {}) {

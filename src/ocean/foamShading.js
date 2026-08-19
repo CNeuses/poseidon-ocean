@@ -67,7 +67,7 @@ const WAVE_SCALE = 2.6;
 // energy — which is also just true of real seas: wave groupiness at km scale.
 // Mean 1 by construction, clamped to +/-40%.
 //
-// ponytail: the sim's detectors ignore the envelope — a damped region's foam
+// The sim's detectors ignore the envelope — a damped region's foam
 // is damped by the same field at draw time (env^3, breaking scales
 // superlinearly with amplitude), not by re-detecting. A +/-25% regional
 // mismatch between detector and drawn geometry is invisible; re-simulating
