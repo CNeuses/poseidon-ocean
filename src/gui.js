@@ -13,6 +13,12 @@ export function createGUI(params, { ocean, shading, updateSun }) {
     // headings. Miss this and every streak in the render points the wrong way
     // the moment the wind slider moves.
     ocean.foamHeading.value.set(...foamHeading(params));
+    // ...and the wind-driven foam budget (ration, residual scale, lifetimes).
+    ocean.applyFoamSeaState();
+    // ponytail: the stencil/lane lattices, per-cascade headings and windage
+    // baked into the compute kernels at construction stay on the old wind —
+    // same accepted staleness maps.js has always documented for the lattice.
+    // Promote them to per-cascade uniforms if live wind-direction work matters.
     ocean.updateInitialSpectrum();
   };
 

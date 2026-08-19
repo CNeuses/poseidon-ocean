@@ -2,7 +2,7 @@ import { StorageTexture, HalfFloatType, RepeatWrapping, LinearMipmapLinearFilter
 import { foamLattice } from './params.js';
 import {
   Fn, instanceIndex, uint, uvec2, vec2, vec3, vec4, float, max, length, saturate,
-  smoothstep, exp, mix, attributeArray, textureStore, texture,
+  smoothstep, exp, mix, attributeArray, textureStore, texture, floor, fract, pow, sin,
 } from 'three/tsl';
 
 // --- whitecap generation ---------------------------------------------------
@@ -42,6 +42,18 @@ const CONV_FULL = 3.20;
 const W_FOLD = 0.72; // fold alone
 const W_CONV = 0.85; // convergence, gated on a steep face
 const W_BOTH = 0.85; // steep *and* folding — the actual break
+// ...and the whole sum is then gated on an ACTUAL CURL. The three detectors
+// shape intensity, but each can fire without the surface visibly overturning:
+// convergence leads the fold by a beat (by design), the steep path marks
+// faces that never curl, and FOLD itself opens at J = 0.68 — a pinch, not a
+// lip. The curl has an exact meaning in this displacement model: the Jacobian
+// collapsing through zero is the surface folding over itself. So injection is
+// permitted only where J has fallen into that collapse, and everything the
+// eye reads as foam grows outward from a real curl via the diffusion, bloom,
+// trail and remnant machinery. Side effect, deliberate: the chop cascade
+// barely ever truly curls (its lambda is rolled off), so chop speckle dies.
+const CURL_OPEN = 0.30; // J below which a lip is genuinely forming
+const CURL_FULL = 0.02; // ...and where the overturn is essentially complete
 
 // The sum above is then cut to a clean event. This is the shape that matters:
 // breaking is RARE and TOTAL, not common and faint. Feeding the accumulators a
@@ -137,17 +149,32 @@ const EVT_ALONG_CREST = 75; // m of tile along the crest line
 // at the top of this block exists to prevent — and a weak wash sitting near the
 // draw threshold is what a carve downstream dices into speckle.
 //
-// The centre sets the ration (about 15% of the surface eligible at +1.04
-// sigma); the width sets whether an event is an event.
-const EVT_LO = 0.536;
-const EVT_HI = 0.570;
+// The eligibility tap is HEX-TILED (see hexTap in the kernel): sampled plain,
+// the stencil repeats on an exact ~19 x 75 m lattice inside the cascade tile,
+// and from altitude the caps form marching rows — the single most artificial-
+// looking pattern an aerial framing shows. Stochastic tiling keeps the seam-
+// free wrap on the tile torus (offsets are hashed from lattice cells of the
+// stencil's own uv space, which wraps at integers) while making event sites
+// aperiodic WITHIN the tile. The 1024 m macro-period of the wave field itself
+// is intrinsic to FFT synthesis and is not this gate's problem to solve.
+// The centre sets the ration; the width sets whether an event is an event.
+// The centre is no longer a compile-time constant — it arrives as the
+// evtLo/evtHi uniforms from foamSeaState() in params.js, which converts the
+// wind speed into an eligibility fraction through the Monahan coverage law.
+// The 0.034 width is preserved there, because "an event is an event" is a
+// property of the detector, not of the sea state.
 // Lateral diffusion of the foam accumulators, per 1/60 s — see the spreading
 // block in the kernel. At 0.16 a hairline reaches about three texels, i.e.
 // twelve metres, over the cap's one-second life, which is a whitecap rather
 // than a knife line and is wide enough to survive the mip chain. Stable well
 // below 0.25.
 const FOAM_SPREAD = 0.16;
-const EVT_DRIFT = 4.5; // m/s, ~c/2 for the 40-100 m band that actually folds
+// ...and a slower one for the aeration channel: a bubble plume genuinely
+// spreads laterally as it rises and shears, and it lives ~60 s, so even a
+// small per-frame coefficient integrates to tens of metres of spread — which
+// is what the reference's trough-filling clouds are. Mass-conserving, so the
+// spread pays for itself in peak amplitude; the injection carries that.
+const AER_SPREAD = 0.035;
 
 // Foam age, in seconds since this water particle was last inside a break. This
 // is the one quantity that lets decay change SHAPE rather than opacity, and
@@ -229,14 +256,100 @@ const TAU_TRAIL = 1.05; // s / foamDecay (~2.6 s) — dragged down the face and 
 // patches. What keeps it honest at this length is the low injection above — the
 // channel is allowed to be old, it is not allowed to be opaque.
 // 2.0 s (5.0 s effective), and deliberately NOT the 10 s that the measured
-// per-event range (0.2-10.4 s) would permit. At 10 s the lace band is c*tau =
-// 90-120 m with a tens-of-seconds lifetime, and a 100 m ribbon of foam that
-// lives that long, elongated along the wind, is a Langmuir windrow — a real
-// phenomenon that this sea state cannot produce, because windrows assemble over
-// 60-300 s of crosswind sweeping and whitecap foam is gone in ten. Reaching it
-// by accident, out of a decay constant, is the one way this file can draw
-// something that is both convincing and physically impossible.
+// per-event range (0.2-10.4 s) would permit: stretching ONE exponential until
+// it draws windrows produces windrows with the wrong assembly physics. The
+// long tail now exists as its own channel instead — see REMNANT below — with
+// the convergence-lane decay modulation that real windrow assembly is.
 const TAU_LACE = 2.00; // s / foamDecay (~5.0 s) — the old dissipating web in the troughs
+
+// --- the second exponential: remnant and aeration ---------------------------
+// Callaghan 2012/2013 measure whitecap decay as a DOUBLE exponential: a 1.4-
+// 4.8 s bulk stage (cap/trail/lace above) and a surfactant-stabilised remnant
+// at tens of seconds. That remnant is 80-90% of the foam AREA on a real sea,
+// and it is the population the reference photo's lace web and wind streaks are
+// made of. Two more accumulators over the same injection:
+//
+//   REMNANT  long-lived surface lace. What keeps a 30-60 s lifetime from
+//            converging to a blanket on a periodic tile is not the tau — it is
+//            that the DECAY IS SPATIAL: fast in divergence lanes, slow in
+//            convergence lanes (the divR term) times a wind-elongated survival
+//            field (the lane tap in the kernel). Old foam then self-organises
+//            into downwind streaks, which is literally what Langmuir
+//            circulation does to it: convergence lanes collect foam,
+//            divergence lanes sweep clean, 0-20 degrees off the wind.
+//   AERATION the subsurface bubble plume. The LONGEST-lived stage of the whole
+//            lifecycle — deep plume layers stay optically visible for >50 wave
+//            periods, and sub-Hinze microbubbles linger for minutes — and the
+//            single most prominent foam feature in the reference: tens-of-
+//            metre milky turquoise patches filling the near-field troughs.
+//            oceanSurfaceMaterial.js reads it for the plume term; it never
+//            draws as white foam itself.
+//
+// Both injections are scaled by the residScale uniform (foamSeaState): the
+// budget a rising wind adds is almost entirely THIS population.
+const INJ_REM = 0.40;
+const INJ_AER = 0.09;
+// Off-lane decay runs this many times faster than in-lane, which is the 10:1
+// wind-elongated survival contrast that assembles streaks out of a uniform
+// deposit. divR modulates on top: convergent water holds its foam.
+const REM_FAST = 7.0;
+const AER_FAST = 3.5;
+// —- onset bloom ——————————————————————————————-
+// A whitecap does not print at full deposit on its first frame. INJ_CAP fills
+// the accumulator past the draw threshold in ~3 frames (~50 ms), so a cap used
+// to materialise fully formed — a pop. Real entrainment BLOOMS: the
+// whitewater front expands from first touchdown over a third of a second. So
+// each texel carries an onset clock (foam2.z) that ramps up while an event is
+// on it and dies with the cap once it passes, and the cap's injection is
+// scaled by that envelope. Because the clock is per-texel and the crest
+// sweeps through the label field, the patch also GROWS spatially from the
+// event core outward instead of switching on as a block.
+//
+// The floor keeps the first frames from being invisible (the seed the bloom
+// grows from), and it is why INJ_CAP needs no compensation: dwell-integrated
+// deposit drops only ~40%, which the saturate() ceiling was clipping off
+// mature caps anyway.
+const BLOOM_T = 0.45; // s from first break to full injection, at the median rate
+const BLOOM_FLOOR = 0.12; // envelope at the instant of onset
+// —- foam slip: how foam moves RELATIVE to the water ————————————-
+// The maps are Lagrangian, so foam already rides the orbital motion for free.
+// What a label-space state cannot do on its own is move foam ACROSS the water
+// — and real foam does, three ways, which together are what make rafts
+// split, collect and surge instead of sitting where they were born:
+//
+//   WINDAGE    the constant downwind skate (advDrift, ~3.5% of U10). Uniform,
+//              so alone it translates the whole field and separates nothing.
+//   DRAINAGE   foam slides DOWNSLOPE. As a wave runs through a raft the slip
+//              first points backward off the advancing face, then forward off
+//              the back — an oscillating smear of several metres per period
+//              that bunches foam into troughs and convergence lines (merging)
+//              and rakes it thin over crests (separating). -grad(h) per texel.
+//   SURGE      while a texel is actually breaking, its whitewater is carried
+//              forward with the crest at a large fraction of the phase speed
+//              (Kleiss & Melville: 0.3-0.8 of c for most of a period). This is
+//              what detaches a fresh cap from its birth label and drives it
+//              down the face.
+//
+// All three feed the semi-Lagrangian backtrace as one per-texel velocity, so
+// divergent slip genuinely tears accumulated foam apart and convergent slip
+// genuinely collects it — the dynamics are the transport, not a decal.
+const SLOPE_SLIP = 2.2; // m/s of drainage per unit of surface slope
+const SURGE = 3.5; // m/s of forward carry while breaking, along the heading
+// Per-texel spread of the bloom RATE, read off the stencil tap's coarse
+// cellular channel. Without it every texel of an event blooms in lockstep and
+// the patch still arrives as one formed unit, only slower; with a ~4:1 rate
+// spread at whitecap scale the fast cells surface first and the froth EXPANDS
+// from seeds outward, which is what a breaking crest actually does.
+// Nominal in-lane taus for the FOAM_PEAK export below; the live values are the
+// remTau/aerTau uniforms.
+const REM_TAU_REF = 30;
+// Lane geometry: windrow lanes are long ALONG the wind and spaced tens of
+// metres ACROSS it. Sampled on a second, deliberately COARSER integer lattice
+// (maxDen 4) than the event stencil: at lattice magnitude ~3.6 one period
+// along the heading is ~280 m on the 1024 m cascade, so the survival lanes are
+// genuinely long features, which the stencil's magnitude-14 lattice cannot be.
+const LANE_ACROSS = 30; // m between lanes, across the wind
+const LANE_DRIFT = 0.5; // m/s the lane pattern crawls downwind
 
 // What one break actually deposits in each accumulator, which is the number
 // foamShading.js has to divide by if a single threshold is to mean the same
@@ -255,6 +368,10 @@ export const FOAM_PEAK = {
   cap: deposit(INJ_CAP, TAU_CAP),
   trail: deposit(INJ_TRAIL, TAU_TRAIL / FOAM_DECAY_REF),
   lace: deposit(INJ_LACE, TAU_LACE / FOAM_DECAY_REF),
+  // Nominal, at the reference tau and unit residScale — the norm downstream
+  // only needs a stable "what one break deposits" yardstick, and the wind
+  // scaling is MEANT to push the mask past 1 in a hard sea.
+  rem: deposit(INJ_REM, REM_TAU_REF),
 };
 
 // rgba16f storage texture: filterable (bilinear) AND storage-capable, tiling
@@ -304,13 +421,21 @@ function mapTexture(N, mips = false) {
 // foamShading needs and cannot reconstruct downstream.
 export function createCascadeMaps(cascade, {
   N, lambda, dt, foamDecay, detailTex, time, heading, headingVec,
+  foamSea, evtDrift = 4.5, advDrift = 0.5,
 }) {
   const displacement = mapTexture(N);
   const derivatives = mapTexture(N);
   const foamMap = mapTexture(N, true);
   cascade.foamMap = foamMap; // consumed by foamShading.js
+  // The long channels: (remnant, aeration, lane, 0). Its own texture rather
+  // than spare channels because it needs the same mip filtering as foamMap and
+  // both consumers (foamShading's windrow lace, oceanSurfaceMaterial's plume)
+  // read it at coarse mips.
+  const foamMap2 = mapTexture(N, true);
+  cascade.foamMap2 = foamMap2;
 
   const foam = attributeArray(N * N, 'vec4'); // (cap, trail, lace, age); zeroed = clean water, age 0
+  const foam2 = attributeArray(N * N, 'vec4'); // (remnant, aeration, 0, 0)
   const prevDisp = attributeArray(N * N, 'vec4'); // (last frame's displacement, last frame's Jacobian trace)
 
   // Integer tile counts, so the event stencil wraps exactly — see EVT_LONG.
@@ -326,6 +451,16 @@ export function createCascadeMaps(cascade, {
   // the target feature size the same way the old axis-aligned counts were.
   const kAcross = Math.max(1, Math.round(L / (lat.mag * EVT_ACROSS_CREST)));
   const kAlong = Math.max(1, Math.round(L / (lat.mag * EVT_ALONG_CREST)));
+  // The windrow lane lattice — same trick at the COARSEST usable rational
+  // approximation (maxDen 2, magnitude ~1.4), because a lane has to be a LONG
+  // feature: one period along this lattice is ~700 m on the 1024 m cascade,
+  // which delivers ~140 m survival lanes — real windrow scale — where the
+  // magnitude-14 stencil lattice tops out at 73 m periods. The ~9 degrees of
+  // angular error is inside the 0-20 degrees real windrows sit off the wind.
+  const lane = foamLattice(headingVec[0], headingVec[1], 2, (2 * Math.PI) / 180);
+  const kLaneAcross = Math.max(1, Math.round(L / (lane.mag * LANE_ACROSS)));
+  // Advection: metres per frame of windage, in texels of this cascade.
+  const texelM = L / N;
 
   const assemble = Fn(() => {
     const id = instanceIndex;
@@ -362,19 +497,23 @@ export function createCascadeMaps(cascade, {
     const converge = saturate(
       divRate.sub(CONV_OPEN).mul(1 / (CONV_FULL - CONV_OPEN)),
     ).toVar();
+    // Remapped so 0.5 is neutral — used by the remnant/aeration decay below
+    // and stored in displacement.w for foamShading's braiding term.
+    const divR = saturate(divRate.mul(0.35).add(0.5)).toVar();
 
+    const curl = float(1).sub(smoothstep(float(CURL_FULL), float(CURL_OPEN), J)).toVar();
     const brk = smoothstep(float(BRK_LO), float(BRK_HI), saturate(
       fold.mul(W_FOLD)
         .add(converge.mul(steep).mul(W_CONV))
         .add(fold.mul(steep).mul(W_BOTH)),
-    )).toVar();
+    )).mul(curl).toVar();
 
     // Where breaking is ALLOWED, on the drifting label-space stencil — see
     // EVT_LONG. level(0) is not optional: a compute kernel has no derivatives,
     // so there is no implicit mip to select.
     const fx = float(coord.x).div(float(N)).toVar();
     const fz = float(coord.y).div(float(N)).toVar();
-    const dr = time.mul(EVT_DRIFT).toVar();
+    const dr = time.mul(evtDrift).toVar();
     // Rotated into the wave frame, on an integer lattice so it still wraps
     // exactly. `u` runs along the heading (the narrow axis — this is what
     // segments a crest), `v` runs along the crest line (the long axis, so an
@@ -382,11 +521,57 @@ export function createCascadeMaps(cascade, {
     // crossing several of them). The drift is along the heading only.
     const u = fx.mul(lat.q).add(fz.mul(lat.p)).toVar();
     const v = fx.mul(-lat.p).add(fz.mul(lat.q)).toVar();
-    const evt = texture(detailTex, vec2(
-      u.mul(kAcross).add(dr.mul(lat.mag * kAcross / L)),
+    // Per-strip drift-phase jitter. The stencil is an exactly-periodic lattice
+    // drifting at one speed, and the horizon showed it: a single row of evenly
+    // spaced caps. Offsetting each along-crest strip's phase by a (periodic —
+    // the multiplier is the integer kAlong) tap of the same field decorrelates
+    // the rows without touching the ration or the seam-free wrap.
+    const jit = texture(detailTex, vec2(v.mul(kAlong), float(0.71))).level(0).b.toVar();
+    // Heitz-style hex tile-and-blend, compute flavour (explicit level 0) —
+    // same construction as the shader's, so the field statistics the EVT gate
+    // was calibrated against are preserved. See the note above EVT_LO.
+    const hash2 = (hv) => fract(sin(vec2(
+      hv.x.mul(127.1).add(hv.y.mul(311.7)),
+      hv.x.mul(269.5).add(hv.y.mul(183.3)),
+    )).mul(43758.5453));
+    const hexTap = (huv) => {
+      const hg = huv.mul(1.8);
+      const sk = vec2(hg.x.sub(hg.y.mul(0.57735)), hg.y.mul(1.15470)).toVar();
+      const hb = floor(sk).toVar();
+      const hf = fract(sk).toVar();
+      const up = smoothstep(float(0.9999), float(1.0001), hf.x.add(hf.y)).toVar();
+      const h0 = hb.add(mix(vec2(0, 0), vec2(1, 1), up)).toVar();
+      const h1 = hb.add(vec2(1, 0)).toVar();
+      const h2 = hb.add(vec2(0, 1)).toVar();
+      const w0 = mix(float(1).sub(hf.x).sub(hf.y), hf.x.add(hf.y).sub(1), up).toVar();
+      const w1 = mix(hf.x, float(1).sub(hf.y), up).toVar();
+      const w2 = mix(hf.y, float(1).sub(hf.x), up).toVar();
+      const M = float(0.4089);
+      const t0 = texture(detailTex, huv.add(hash2(h0))).level(0).sub(M);
+      const t1 = texture(detailTex, huv.add(hash2(h1))).level(0).sub(M);
+      const t2 = texture(detailTex, huv.add(hash2(h2))).level(0).sub(M);
+      const nrm = max(float(1e-4),
+        w0.mul(w0).add(w1.mul(w1)).add(w2.mul(w2))).sqrt();
+      return t0.mul(w0).add(t1.mul(w1)).add(t2.mul(w2)).div(nrm).add(M).toVar();
+    };
+    const evtT = hexTap(vec2(
+      u.mul(kAcross).add(dr.mul(lat.mag * kAcross / L)).add(jit.sub(0.41).mul(0.9)),
       v.mul(kAlong),
-    )).level(0).b.toVar();
-    const gate = smoothstep(float(EVT_LO), float(EVT_HI), evt).toVar();
+    ));
+    const evt = evtT.b.toVar();
+    const gate = smoothstep(foamSea.evtLo, foamSea.evtHi, evt).toVar();
+    // The windrow survival lanes — see LANE_ACROSS. Long along the wind (one
+    // period of the coarse lattice, ~250-350 m, features ~50 m), tens of
+    // metres apart across it, crawling downwind. This field never gates
+    // injection; it modulates the DECAY of the two long channels, which is how
+    // a uniform deposit self-organises into streaks.
+    const u2 = fx.mul(lane.q).add(fz.mul(lane.p)).toVar();
+    const v2 = fx.mul(-lane.p).add(fz.mul(lane.q)).toVar();
+    const laneN = hexTap(vec2(
+      u2.add(time.mul(LANE_DRIFT * lane.mag / L)),
+      v2.mul(kLaneAcross),
+    )).b.toVar();
+    const laneS = smoothstep(float(0.40), float(0.52), laneN).toVar();
 
     // --- lateral spreading ---------------------------------------------------
     // A break entrains air over a PATCH. This detector finds a hairline: `fold`
@@ -427,7 +612,58 @@ export function createCascadeMaps(cascade, {
       .add(foam.element(rowU.add(coord.x)))
       .add(foam.element(rowD.add(coord.x)))
       .mul(0.25).toVar();
-    const self = foam.element(id).toVar();
+    // ...and the aeration channel's own, slower spread — see AER_SPREAD.
+    const nb2 = foam2.element(row.add(cxL)).y
+      .add(foam2.element(row.add(cxR)).y)
+      .add(foam2.element(rowU.add(coord.x)).y)
+      .add(foam2.element(rowD.add(coord.x)).y)
+      .mul(0.25).toVar();
+    // --- transport -----------------------------------------------------------
+    // Semi-Lagrangian backtrace (the Crest UpdateFoam pattern): the state is
+    // read from one frame of WINDAGE upwind, so accumulated foam drifts
+    // downwind through the label field instead of being nailed forever to the
+    // water particle it formed on. Windage is real — foam sits on the surface
+    // and the wind pushes it at ~3.5% of U10 relative to the water — and it is
+    // half of what lets the long channels organise into streaks rather than a
+    // blanket (the lane-modulated decay below is the other half).
+    //
+    // Manual bilinear on the state buffers, exact on the periodic tile. Same
+    // in-place Gauss-Seidel caveat as the diffusion above: the offset stays a
+    // few hundredths of a texel per frame (max slip ~7 m/s against a 4 m
+    // texel at 60 fps), so a neighbour being pre- or post-update is at most
+    // one frame of extra smear along the slip axis.
+    //
+    // The slip field — see SLOPE_SLIP. Windage is constant, drainage is
+    // -grad(h) (undisplaced frame, which is the frame this state lives in),
+    // and the surge rides the break detector so only actively-breaking texels
+    // surge. Per-texel and divergent, which is the whole point.
+    const brkG = brk.mul(gate).toVar();
+    const slipX = float(headingVec[0] * advDrift)
+      .sub(DyxDyz.x.mul(SLOPE_SLIP))
+      .add(brkG.mul(SURGE * headingVec[0])).toVar();
+    const slipZ = float(headingVec[1] * advDrift)
+      .sub(DyxDyz.y.mul(SLOPE_SLIP))
+      .add(brkG.mul(SURGE * headingVec[1])).toVar();
+    const px = float(coord.x).sub(slipX.mul(dt).mul(1 / texelM)).add(float(N)).toVar();
+    const py = float(coord.y).sub(slipZ.mul(dt).mul(1 / texelM)).add(float(N)).toVar();
+    const ix0 = uint(floor(px)).mod(uint(N)).toVar();
+    const iy0 = uint(floor(py)).mod(uint(N)).toVar();
+    const ix1 = ix0.add(uint(1)).mod(uint(N)).toVar();
+    const iy1 = iy0.add(uint(1)).mod(uint(N)).toVar();
+    const bx = fract(px).toVar();
+    const by = fract(py).toVar();
+    const i00 = iy0.mul(uint(N)).add(ix0).toVar();
+    const i01 = iy0.mul(uint(N)).add(ix1).toVar();
+    const i10 = iy1.mul(uint(N)).add(ix0).toVar();
+    const i11 = iy1.mul(uint(N)).add(ix1).toVar();
+    const self = mix(
+      mix(foam.element(i00), foam.element(i01), bx),
+      mix(foam.element(i10), foam.element(i11), bx), by,
+    ).toVar();
+    const self2 = mix(
+      mix(foam2.element(i00), foam2.element(i01), bx),
+      mix(foam2.element(i10), foam2.element(i11), bx), by,
+    ).toVar();
     // Age is NOT diffused — it is a per-particle clock, and averaging it with
     // the neighbours would make the age of foam depend on how long ago the water
     // NEXT to it broke.
@@ -439,21 +675,69 @@ export function createCascadeMaps(cascade, {
     // gives them a band tens of metres wide. It is only the cap that is born as
     // a hairline, and only fresh whitewater that actually spreads under its own
     // turbulence. INJ_CAP carries the compensation for what the diffusion costs.
-    const spread = saturate(dt.mul(60).mul(FOAM_SPREAD)).toVar();
+    // .min(0.4): the Gauss-Seidel mix destabilises past ~0.5, and dt is only
+    // clamped at 0.1 s -- 0.1 s x timeScale 3 would have reached 1.0.
+    const spread = saturate(dt.mul(60).mul(FOAM_SPREAD)).min(float(0.4)).toVar();
     const acc = vec4(mix(self.x, nb.x, spread), self.y, self.z, self.w).toVar();
     const inj = brk.mul(gate).mul(dt).toVar();
-    const cap = saturate(acc.x.mul(exp(dt.mul(-1 / TAU_CAP))).add(inj.mul(INJ_CAP))).toVar();
+    // The onset clock. Keyed on the CAP ACCUMULATOR being present, NOT on the
+    // detector: the convergence term fires a beat before the fold (by
+    // design), so a detector-keyed clock completes during the invisible
+    // pre-fold phase and the cap still arrived fully formed. Keyed on
+    // deposition, the ramp overlaps exactly the phase the eye watches.
+    // Advected with the rest of the state (self2), so a blooming patch rides
+    // its water; dies with the cap's own tau once the event passes.
+    const onDep = smoothstep(float(0.03), float(0.15), acc.x).toVar();
+    // rate jitter ~0.45x-1.8x off the cellular channel — the seeds
+    const bRate = evtT.r.sub(0.41).mul(3.2).add(1).clamp(0.45, 1.8).toVar();
+    const bloom = mix(
+      self2.z.mul(exp(dt.mul(-1 / TAU_CAP))),
+      self2.z.add(dt.mul(bRate).mul(1 / BLOOM_T)).min(float(1)),
+      onDep,
+    ).toVar();
+    const env = mix(float(BLOOM_FLOOR), float(1), bloom).toVar();
+    // The residual channels follow the wind — see foamSeaState() in params.js.
+    // Cap deliberately does not: the extra budget of a harder sea is aged foam
+    // and plume, not more simultaneous Stage-A caps.
+    const injR = inj.mul(foamSea.residScale).toVar();
+    const cap = saturate(acc.x.mul(exp(dt.mul(-1 / TAU_CAP))).add(inj.mul(INJ_CAP).mul(env))).toVar();
     const trail = saturate(
-      acc.y.mul(exp(dt.mul(foamDecay).mul(-1 / TAU_TRAIL))).add(inj.mul(INJ_TRAIL)),
+      acc.y.mul(exp(dt.mul(foamDecay).mul(-1 / TAU_TRAIL))).add(injR.mul(INJ_TRAIL)),
     ).toVar();
+    // ...with a mild lane factor of its own: the bulk web is most of the foam
+    // the eye sees, and windrow organisation that only reaches the faint
+    // remnant channel underneath it is invisible. 1.6:0.75 against the
+    // remnant's 7:1 — a bias, not a stencil.
+    const holdL = mix(float(1.6), float(0.75), laneS).toVar();
     const lace = saturate(
-      acc.z.mul(exp(dt.mul(foamDecay).mul(-1 / TAU_LACE))).add(inj.mul(INJ_LACE)),
+      acc.z.mul(exp(dt.mul(foamDecay).mul(holdL).mul(-1 / TAU_LACE))).add(injR.mul(INJ_LACE)),
     ).toVar();
+    // The second exponential — see INJ_REM. Decay RATE is spatial: fast off
+    // the survival lanes and in divergent water, slow on them and in
+    // convergence, which is Langmuir assembly acting on a lifetime rather than
+    // a stamp of streaks painted on. Injected from the same events (a remnant
+    // is always born under bulk foam).
+    const hold = mix(float(REM_FAST), float(1.0), laneS)
+      .mul(mix(float(1.5), float(0.6), divR)).toVar();
+    const rem = saturate(
+      self2.x.mul(exp(dt.mul(hold).div(foamSea.remTau).negate())).add(injR.mul(INJ_REM)),
+    ).toVar();
+    const holdA = mix(float(AER_FAST), float(1.0), laneS)
+      .mul(mix(float(1.3), float(0.75), divR)).toVar();
+    const aerAcc = mix(self2.y, nb2, saturate(dt.mul(60).mul(AER_SPREAD)).min(float(0.4))).toVar();
+    const aer = saturate(
+      aerAcc.mul(exp(dt.mul(holdA).div(foamSea.aerTau).negate())).add(injR.mul(INJ_AER)),
+    ).toVar();
+    foam2.element(id).assign(vec4(rem, aer, bloom, laneS));
     // Age: zeroed while breaking, integrating dt once the break has passed.
     // smoothstep rather than a step so a texel on the edge of an event does not
     // flicker its age between 0 and whatever it had accumulated.
     const fresh = smoothstep(float(0.25), float(0.45), inj.div(max(dt, float(1e-4)))).toVar();
-    const age = acc.w.add(dt).mul(float(1).sub(fresh)).min(float(AGE_MAX)).toVar();
+    // The reset is exponentiated by the frame count a real 60 fps second has,
+    // so the age a break-edge texel equilibrates to does not depend on dt --
+    // a bare (1 - fresh) baked 2x the rim age at the capture loop's 30 fps.
+    const keep = pow(max(float(1).sub(fresh), float(1e-6)), dt.mul(60)).toVar();
+    const age = acc.w.add(dt).mul(keep).min(float(AGE_MAX)).toVar();
     foam.element(id).assign(vec4(cap, trail, lace, age));
 
     const disp = vec3(DxDz.x.mul(lambda), DyDxz.x, DxDz.y.mul(lambda)).toVar();
@@ -465,12 +749,13 @@ export function createCascadeMaps(cascade, {
     // face and divergent on the rear, and with this project's measured RMS
     // slopes and lambda = 2.2 the area modulation is about +/-20%. That is why
     // real residual foam looks braided rather than evenly spread — it is
-    // squeezed thicker and stretched thinner once per wave.
-    const divR = saturate(divRate.mul(0.35).add(0.5)).toVar();
+    // squeezed thicker and stretched thinner once per wave. (divR itself is
+    // computed up with the detector, where the decay modulation needs it.)
     textureStore(displacement, coord, vec4(disp, divR)).toWriteOnly();
     textureStore(derivatives, coord, vec4(DyxDyz.x, DyxDyz.y, DxxDzz.x.mul(lambda), DxxDzz.y.mul(lambda))).toWriteOnly();
     textureStore(foamMap, coord, vec4(cap, trail, lace, age)).toWriteOnly();
+    textureStore(foamMap2, coord, vec4(rem, aer, bloom, laneS)).toWriteOnly();
   })().compute(N * N);
 
-  return { displacement, derivatives, foamMap, foam, assemble };
+  return { displacement, derivatives, foamMap, foamMap2, foam, foam2, assemble };
 }

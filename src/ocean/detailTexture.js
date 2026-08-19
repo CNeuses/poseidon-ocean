@@ -207,7 +207,12 @@ export function makeDetailTexture(size = 512, octaves = 5, persistence = 0.68) {
   const gain = TARGET_STD / Math.sqrt(Math.max(sum2 / n - mean * mean, 1e-9));
   const fbm = (u, v) => (raw(u, v) - mean) * gain + TARGET_MEAN;
 
-  const clamp255 = (x) => Math.max(0, Math.min(255, Math.round(x)));
+  // Dithered quantisation, +/- half an LSB before the round. The filament
+  // transform in foamShading divides these channels by widths of 0.15-0.24,
+  // amplifying 8-bit staircase plateaus ~6x — visible as contour banding in
+  // the ribbons. Half-LSB noise converts the staircase into grain the carves
+  // already own.
+  const clamp255 = (x) => Math.max(0, Math.min(255, Math.round(x + (rng() - 0.5))));
   const data = new Uint8Array(size * size * 4);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {

@@ -1,6 +1,6 @@
 import { Vector2 } from 'three/webgpu';
 import { uniform, attributeArray } from 'three/tsl';
-import { foamHeading } from './params.js';
+import { foamHeading, foamSeaState } from './params.js';
 import { createSharedSpectrumUniforms, applySpectrumParams } from './spectrum.js';
 import { gaussianNoise } from './gaussianNoise.js';
 import { OceanCascade } from './OceanCascade.js';
@@ -72,8 +72,30 @@ export class Ocean {
     this.lambda = uniform(params.lambda);
     this.dt = uniform(1 / 60);
     this.foamDecay = uniform(params.foamDecay);
+    // The wind-driven foam budget — see foamSeaState() in params.js. Uniforms,
+    // so the GUI's wind slider moves the ration/lifetimes live; the stencil
+    // lattices and the windage drift stay baked at construction like the
+    // heading does.
+    const sea = foamSeaState(params);
+    this.foamSea = {
+      evtLo: uniform(sea.evtLo),
+      evtHi: uniform(sea.evtHi),
+      residScale: uniform(sea.residScale),
+      remTau: uniform(sea.remTau),
+      aerTau: uniform(sea.aerTau),
+    };
     this.assembleGroup = [];
-    for (const c of this.cascades) {
+    // Per-cascade anisotropy: cascade 0 carries the 24-1024 m band and breaks
+    // along the fold-weighted heading; cascade 1 is the 4-24 m chop, which
+    // travels with the local wind, so its trails must not be laid at cascade
+    // 0's angle. Drift is ~half the phase speed of each band's folding waves.
+    const a = (params.local.windDirection * Math.PI) / 180;
+    const perCascade = [
+      { headingVec: this.foamHeadingVec, evtDrift: 4.5 },
+      { headingVec: [Math.cos(a), Math.sin(a)], evtDrift: 2.4 },
+      { headingVec: [Math.cos(a), Math.sin(a)], evtDrift: 1.2 },
+    ];
+    this.cascades.forEach((c, i) => {
       const maps = createCascadeMaps(c, {
         N: this.N,
         lambda: this.lambda,
@@ -82,12 +104,26 @@ export class Ocean {
         detailTex,
         time: this.time,
         heading: this.foamHeading,
-        headingVec: this.foamHeadingVec,
+        headingVec: perCascade[i]?.headingVec ?? this.foamHeadingVec,
+        foamSea: this.foamSea,
+        evtDrift: perCascade[i]?.evtDrift ?? 4.5,
+        advDrift: sea.advDrift,
       });
       c.displacement = maps.displacement;
       c.derivatives = maps.derivatives;
       this.assembleGroup.push(maps.assemble);
-    }
+    });
+  }
+
+  // Push the wind-derived foam uniforms — called alongside applySpectrumParams
+  // whenever the sea state changes.
+  applyFoamSeaState() {
+    const sea = foamSeaState(this.params);
+    this.foamSea.evtLo.value = sea.evtLo;
+    this.foamSea.evtHi.value = sea.evtHi;
+    this.foamSea.residScale.value = sea.residScale;
+    this.foamSea.remTau.value = sea.remTau;
+    this.foamSea.aerTau.value = sea.aerTau;
   }
 
   // Recompute h0 (once, and whenever wind/spectrum params change).
