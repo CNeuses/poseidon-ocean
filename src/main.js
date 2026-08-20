@@ -111,6 +111,9 @@ async function main() {
     foamColor: uniform(new Color(c.foam)),
     foamThreshold: uniform(params.foamThreshold),
     foamScale: uniform(params.foamScale),
+    foamBright: uniform(params.foamBright), // top rung of the foam tonal ladder
+    foamRelief: uniform(params.foamRelief), // foam micro-relief modulation
+    foamMilk: uniform(params.foamMilk), // submerged bubble-plume opacity
     detail: uniform(params.detailStrength),
     time: uniform(0),
     originXZ: uniform(new Vector2()), // world-space centre of the ocean tile

@@ -22,7 +22,13 @@ export function createGUI(params, { ocean, shading, updateSun }) {
   const foam = gui.addFolder('Foam');
   foam.add(params, 'foamThreshold', -0.5, 1.5, 0.02).name('threshold').onChange((v) => { shading.foamThreshold.value = v; });
   foam.add(params, 'foamScale', 0.2, 8, 0.1).name('coverage').onChange((v) => { shading.foamScale.value = v; });
-  foam.add(params, 'foamDecay', 0.02, 1, 0.01).name('decay (low = lingers)').onChange((v) => { ocean.foamDecay.value = v; });
+  foam.add(params, 'foamDecay', 0.5, 14, 0.5).name('wake e-fold (s)').onChange((v) => { ocean.foamDecay.value = v; });
+  // one dial per appearance item, all of them zeroable so each can be checked
+  // in isolation against a shot
+  foam.add(params, 'foamSpread', 0, 4, 0.02).name('wake spread (1/s)').onChange((v) => { ocean.foamSpread.value = v; });
+  foam.add(params, 'foamBright', 0.2, 1.4, 0.02).name('brightness').onChange((v) => { shading.foamBright.value = v; });
+  foam.add(params, 'foamRelief', 0, 0.4, 0.005).name('micro-relief').onChange((v) => { shading.foamRelief.value = v; });
+  foam.add(params, 'foamMilk', 0, 0.8, 0.02).name('plume milkiness').onChange((v) => { shading.foamMilk.value = v; });
 
   const surf = gui.addFolder('Surface');
   surf.add(params, 'detailStrength', 0, 0.5, 0.01).name('detail noise').onChange((v) => { shading.detail.value = v; });
