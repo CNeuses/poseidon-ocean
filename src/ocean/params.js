@@ -315,9 +315,63 @@ export const params = {
   palette: 1,
 
   // --- foam (step 6) ---
-  foamThreshold: 0.4, // accumulated-Jacobian value below which foam appears (lower = only real breaks)
+  // lambda_min accumulator value below which foam draws. CALIBRATED, not picked:
+  // Monahan & O'Muircheartaigh 1980 gives whitecap coverage W = 3.84e-6*U10^3.41
+  // — about 1% of the sea at this 10.5 m/s wind, 4% at 15, 10% at 20, zero
+  // below ~4 m/s. Measured foam area against that: 0.7% at 0.30, 1.6% at 0.33.
+  // lambda_min fires more readily than the old det J, so this sits well below
+  // the 0.4 that criterion wanted.
+  foamThreshold: 0.32,
   foamScale: 2.5, // foam coverage falloff
-  foamDecay: 0.4, // foam recovery rate (lower = foam lingers/dissipates longer)
+  // e-folding decay TIME of foam in SECONDS, per the measured whitecap law
+  // A(t) = A0*exp(-t/tau); tau ~ 3.85 s in seawater. Bigger = longer wake.
+  // Scaled per cascade by sqrt(L/144) in maps.js. Was a per-frame rate.
+  foamDecay: 3.9,
+  // Spatial dissipation of that same accumulator, in 1/s: the per-second weight
+  // with which each texel blends toward a 4-tap tent of its own neighbourhood
+  // in maps.js. Every shipped foam sim dissipates in space as well as in time
+  // (War Thunder, ATLAS, Sea of Thieves), and without it patches fade in place
+  // with hard edges. 1.32 is "one kernel footprint of softening per e-folding
+  // time" — sigma reaches 2.7 / 2.0 / 2.2 texels across the three cascades over
+  // one tau, advective numerical diffusion included. 0 turns spatial
+  // dissipation off, which is the check that it is reaching the image at all.
+  foamSpread: 1.32,
+  // Brightness of the top rung of the foam tonal ladder (albedo x irradiance,
+  // pre-exposure, before the peak normalisation). Foam is NOT one flat white:
+  // fresh multilayer caps reflect ~0.50 of the visible (Whitlock, Bartlett &
+  // Gurganus 1982; Dierssen 2019) and Koepke 1984 followed individual whitecaps
+  // down to 0.03-0.10 within ~10 s, so oceanSurfaceMaterial.js runs a two-axis
+  // tone (age x within-raft thickness) and this is its LEVEL.
+  //
+  // MEASURED, and it is the number that decides whether the ladder is a
+  // redistribution or a dimming. 0.88 lands the calibrated bright-pixel count
+  // at 53758 against the pre-change 53911 (-0.3%), i.e. the foam is spread
+  // across the ladder without the population moving. Raising it lifts the whole
+  // ladder further past Khronos PBR Neutral's knee, where rungs are DESTROYED
+  // rather than compressed (1.0 -> 0.911, 1.5 -> 0.954 post-exposure); lowering
+  // it drops solid caps out of the calibrated population entirely — at 0.80 the
+  // count fell to 45263, nearly all of it foam.
+  foamBright: 0.88,
+  // Micro-relief on the foam: rms modulation of foam brightness by the gradient
+  // of the baked cellular channels, projected on the sun. Fixes the "foam is a
+  // flat decal" read (Crest issue #21; War Thunder's 2026 Ninth Wave
+  // micro-relief overlay) for free — the gradient comes off taps the capillary
+  // ripple already fetches. 0 is off, and it measures as off: 0.11 delivered a
+  // maximum of 10/255 on near-field foam, because only the HORIZONTAL part of
+  // the sun direction projects onto a horizontal slope and this scene's default
+  // sun is 51.5 degrees up, so cos(51.5) = 0.62 of the nominal figure survives.
+  // 0.18 restores the designed ~11% rms at that elevation. The delivered amount
+  // still scales with cos(elevation), which is physically right — relief
+  // shading is strongest under grazing light — so the golden preset's 11.2
+  // degree sun gets 1.6x this scene's.
+  foamRelief: 0.18,
+  // Opacity ceiling of the submerged bubble plume that milks the water under
+  // and beyond a cap (Crest's transmissive bubble layer, War Thunder's
+  // energy-modulated milkiness, Uncharted's foam-reduces-apparent-depth cue).
+  // A whitecap's plume is about one optical depth at its own scale, so 1 - 1/e
+  // = 0.63 is the physical ceiling; 0.45 ships because at 0.63 a lace hole
+  // loses half its contrast against the raft. 0 turns the plume off.
+  foamMilk: 0.45,
 
   // --- detail ---
   detailStrength: 0.1, // sub-grid normal-noise amount (breaks up uniformity)

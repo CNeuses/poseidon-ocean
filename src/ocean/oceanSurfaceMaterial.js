@@ -160,6 +160,77 @@ const RIPPLE_FOOT = 0.22; // m of footprint at which the coarse octave is filter
 const RIPPLE_OCT = 4.0; // the second octave's scale against the first (~11 cm and 6 cm)
 const RIPPLE_OCT_AMP = 0.85; // ...and its weight
 
+// --- foam micro-relief -----------------------------------------------------
+// Foam is a flat decal right now: the lace fields modulate its BRIGHTNESS but
+// not its shape, so a cap lights uniformly and reads as paint. That is Crest
+// issue #21 verbatim ("appears flat"; at sunset "looks overly saturated because
+// the entire surface receives uniform lighting"), and the fix is Crest's own
+// "Foam 3D Lighting": take the GRADIENT of a field you already have. War
+// Thunder shipped the same thing in the 2026 "Ninth Wave" update as a
+// micro-relief overlay for a slowly-settling 3D-suspension look.
+//
+// Here the field is detailTexture's CELLULAR pair (R, G), differenced at the
+// same three taps the capillary ripple above already fetches off B and A. So
+// this costs ZERO new texture samples — rippleGrad pulls whole vec4s and throws
+// two channels away.
+//
+// Cellular is the right family for a bubble raft, for the reason
+// detailTexture.js gives for the foam holes: one feature per grid cell so
+// clusters cannot pile up (autocorrelation 0.117 at a tenth of a tile against
+// the fbm's 0.414), each point with its own lognormal radius so the bubbles are
+// visibly not all one size. The channel contract makes the tap reuse exact
+// rather than merely convenient: R's feature diameter is 0.18 of a tile against
+// B's 0.176, G's 0.078 against A's 0.088, so the ripple's own footprint fades
+// (fadeA, fadeB) are already the right band limits. Delivered feature sizes:
+//   coarse set (1.82 m tile): R 33 cm, G 14 cm — the clump-scale undulation.
+//   fine set   (0.45 m tile): R  8 cm, G 3.5 cm — the bubble raft itself.
+// Both inherit the ripple's slow drift, which is the settling: the fine set
+// translates at 0.09/2.2 = 4.1 cm/s of world.
+//
+// This is a BRIGHTNESS term, not a normal fed to the specular, and that is
+// deliberate. Inside foam a2 = roughSpec^4, so the GGX alpha is roughSpec^2 =
+// 0.16 and the lobe half-width is atan(0.16) = 9.1 degrees; worse,
+// `glint = max(ggx - 1.5, 0)` below is a HARD threshold with a 12.8-degree
+// acceptance cone (peak ggx = 1/(a2*pi) = 12.4). A perturbation of the size
+// that reads as bubbles is COARSER than both, so routing it through dot(N', H)
+// would reshuffle glint membership per pixel and flash bubble-scale specks at
+// wave frequency — and it would do it on WATER as well as foam, since the
+// obvious gate (foamRough) is a 4.5 m-blurred halo that is nonzero metres
+// outside any cap. A bounded factor on the finished foam brightness cannot do
+// any of that, and needs no gate at all beyond `coverage`, which already masks
+// the term and which descends from the accumulator (so it has memory).
+// This scene's default sun also sits at 51.5 degrees but its other preset is
+// 11.2, where a perturbed normal inside saturate(dot(Nf, L)) clamps to zero
+// over a large fraction of the raft (a hard terminator on every cell) and is
+// clipped away entirely on any crest facing away from the sun.
+const FOAM_RELIEF_FINE = 0.6; // weight of G against R inside one tap set
+// MEASURED on the real bake (via makeDetailTexture, bilinear finite difference
+// at RIPPLE_STEP over a stride-2 sweep of the tile): rms(d/dx) is 0.01151 for R
+// and 0.02490 for G, so G is 2.16x steeper per unit weight (it is a 2.2x denser
+// lattice, 11 cells against 5). 0.6 brings the two slope contributions to
+// 0.01151 and 0.01494 — within a third of each other — so the raft carries BOTH
+// cell sizes rather than collapsing onto the finest. Cross-check that the two
+// lattices are effectively independent: sqrt(0.01151^2 + 0.01494^2) = 0.01886
+// against the directly measured 0.01906, agreeing to 1%.
+const FOAM_RELIEF_OCT = 0.55; // weight of the coarse (clump) set against the fine
+// Inverted against the ripple's RIPPLE_OCT_AMP: there the coarse set leads by
+// 1.18x, here the fine set leads by 1.8x, because bubble scale is 3.5-8 cm and
+// 14-33 cm is only the raft's slow lumpiness. 0.55 keeps 0.55/hypot(0.55,1) =
+// 48% of full strength in the coarse-only regime, so the relief HALVES when the
+// bubble grain filters out rather than vanishing with it.
+const FOAM_RELIEF_RMS = 0.01906; // measured rms(d/dx) of R + 0.6 G at RIPPLE_STEP
+// Two independent octaves at weights (0.55, 1) sum in quadrature, so this gain
+// makes reliefGrad a field whose PER-COMPONENT rms is 1 at full fade.
+// Everything downstream is then in sigma and nothing has to know about the bake.
+// A difference of two samples has mean 0 whatever the weights, so TARGET_MEAN
+// never enters and there is no shrunken-std trap here.
+const FOAM_RELIEF_NORM = 1 / (FOAM_RELIEF_RMS * Math.hypot(FOAM_RELIEF_OCT, 1)); // 46.0
+// Tail clamp, in sigma. cellularField is min(|x - p|/r), an unclamped distance
+// field, so its gradient is DISCONTINUOUS along every cell boundary where the
+// min switches feature point. Unclamped, those creases print as hard bright and
+// dark lines through the raft rather than as bubble shading.
+const FOAM_RELIEF_CLAMP = 2.0;
+
 // Body. Mean sea level is y = 0, so height above it is a direct read on where
 // a point sits between trough floor and crest lip. Every ramp built on it is
 // *asymptotic*, never clamped: a saturate() here paints a hard iso-height
@@ -498,6 +569,339 @@ const SAT_BOOST = [1.12, 1.00];
 const SPEC_AA_VAR = 6.0; // roughness^2 added per unit of normal fwidth
 const SPEC_AA_DESAT = 0.6;
 
+// --- the foam carve: de-tiled, and decoded AC3-style ------------------------
+// The dissolve read ONE 512^2 texture at 17 m and 3.4 m. The beat is not a
+// cell/tile coincidence — the shipped carve touched no cellular channel at all,
+// only .b and .a. It is that detailTexture.js bakes A as fbm(u*2, v*2), i.e.
+// the SAME field as B at doubled UV, so the shipped pair was one field at 17 m
+// and 1.7 m: an exact 10:1 harmonic of itself, re-aligning perfectly every
+// 17 m. Three independent causes of a legible repeat, three fixes, applied
+// together because each removes only one: a domain WARP (no two copies the same
+// shape), a CONSTANT rotation between the taps (the two lattices never share an
+// axis), and a NON-HARMONIC ratio between DIFFERENT channels.
+//
+// On top of that the carve is decoded the way Rendering Assassin's Creed III
+// (St-Amour, GDC 2013) decodes foam: three grayscale densities — coarse,
+// sparse, medium — with one ramp on foam intensity deciding the mix, "at ~0.1
+// mostly coarse, at ~0.8 all coarse + all sparse + ~50% medium". detailTexture
+// already bakes the equivalent set, so the densities cost nothing new: two taps
+// are already paid for and a sample returns all four channels.
+//   coarse = fbm B at the 17 m tile, warped          -> 2.99 m patch silhouette
+//   sparse = coarse Worley R at the fine tile, warped, rotated, INVERTED
+//                                                    -> 66 cm cells, 74 cm pitch
+//   medium = fine Worley G at the same fine tap       -> 29 cm grain
+// The sparse layer is inverted because a cellular F1 field is LOW near its
+// feature points: its high side is the cell walls, a connected web, and its low
+// side is the isolated round spots that "sparse" means.
+const CARVE_MEAN = 0.4089; // detailTexture.js TARGET_MEAN, every channel
+const CARVE_STD1 = 0.1328; // detailTexture.js TARGET_STD, one channel, mip 0
+// The shipped composite weights, kept so the calibrated cut keeps its meaning.
+const CARVE_W_C = 0.62;
+const CARVE_W_F = 0.38;
+// Tiles. The coarse tile is the shipped 17 m UNCHANGED — same channel, same
+// scale, so the coarse feature stays 0.176*17 = 2.99 m and both drift speeds
+// stay bit-identical. The fine tile is 17/(3 + phi): the ratio whose continued
+// fraction is all 1s, hence worst-approximable (limsup q^2|x - p/q| =
+// 1/sqrt(5), the Hurwitz maximum). Its convergents are Fibonacci, so the first
+// place the two lattices come back within a fine feature width of alignment is
+// 5 coarse tiles (85 m, 0.33 m residual against a 0.29 m feature) then 8
+// (136 m, 0.21 m) — against the old 5:1, which re-aligned PERFECTLY every 17 m.
+const CARVE_TILE_C = 17;
+const CARVE_TILE_F = CARVE_TILE_C / (3 + (1 + Math.sqrt(5)) / 2); // 3.68124 m
+// A CONSTANT rotation on the fine tap so its jittered SQUARE cellular lattices
+// never share an axis with the coarse tap's tiling and drift. tan(theta) =
+// 1/phi: a square lattice has a coincidence rotation at every atan(p/q), and
+// the worst-approximable slope has no low-order coincidence site.
+// atan(0.618034) = 31.72 degrees. What NOT to use: 0.54 rad, whose tan = 0.5994
+// is within 0.4% of 3/5 — the 3-4-5 coincidence rotation, which maps a square
+// lattice onto a sublattice of itself.
+//
+// Constant is the structural point. A spatially varying rotation of a world
+// coordinate shears by |p| * grad(theta), and worldXZ reaches 20 km on this
+// radial grid, so a +/-20 degree field over 60 m shears by a factor of ~100.
+// Zero gradient, no lever arm. cos/sin folded at build time — no trig, and no
+// Math call inside the shader body.
+const CARVE_ROT = Math.atan(2 / (1 + Math.sqrt(5))); // 0.553574 rad
+const CARVE_ROT_C = Math.cos(CARVE_ROT); // 0.850651
+const CARVE_ROT_S = Math.sin(CARVE_ROT); // 0.525731
+// The spatial variation comes from a DOMAIN WARP, the origin-safe way to vary a
+// local frame: a translation field's Jacobian is I + grad(w), a local rotation
+// plus a mild shear, with no |p| term. A periodic zero-mean warp is also a
+// rearrangement of the plane, so to first order it cannot change the field's
+// histogram and therefore cannot change foam area.
+//
+// Sized by the shear it costs. The components are the fbm pair read at one tap;
+// at this tile their feature diameters are 0.176*110 = 19.4 m and 0.088*110 =
+// 9.7 m, and the per-component displacement std is 0.1328*8.0 = 1.06 m, so the
+// dominant-octave gradients are 0.055 and 0.110, ~sqrt(3) higher over three
+// octaves at equal per-octave gradient energy: ~0.10 and ~0.19. det J stays
+// comfortably positive (no folding) and Yu, Neyret, Bruneton & Holzschuch
+// 2011's distortion metric max(sigma_max, 1/sigma_min) tops out near 1.2, far
+// inside their kill margin. The payoff is the DIFFERENCE in warp between two
+// copies of the coarse tile 17 m apart, ~1.7 m — over half a coarse feature,
+// and several times over for the 29 cm fine features.
+//
+// The bias is CARVE_MEAN, not 0.5, and that is what makes the warp degrade
+// gracefully where fwidth explodes at grazing incidence and taps mip-flatten
+// toward the channel mean: a flattened tap gives exactly (0, 0), so the carve
+// reads unwarped. A 0.5 bias would leave a spurious (-0.73, -0.73) m offset
+// that fades IN with distance.
+const CARVE_WARP_TILE = 110; // m
+const CARVE_WARP_AMP = 8.0; // m per unit of channel deviation
+// detailTexture.js bakes A as the B field at doubled UV, sharing the same
+// coarsest-octave lattice values, so at ONE texel the two are correlated
+// (rho ~ 0.249). Uncorrected the warp vector is biased along the diagonal
+// (principal axes 1.29:1). Gram-Schmidt on the y component removes it for two
+// multiplies and preserves the degrade-to-exactly-zero property, because both
+// terms are already mean-biased.
+const CARVE_WARP_RHO = 0.249;
+const CARVE_WARP_ORTH = 1 / Math.sqrt(1 - 0.249 * 0.249); // 1.03242
+// Footprint at which the FINE tile is treated as gone: half the 0.30 m grain,
+// the same half-feature rule RIPPLE_FOOT uses. It drives BOTH the ramp's fine
+// weights and the shipped-sigma model below, which is what makes the contrast
+// match exact rather than approximate — see CARVE_TRIM.
+const CARVE_FOOT_F = 0.15;
+// AC3's published ramp stops, and the interpolation between them. These five
+// ARE the ramp; they are the only part of the decode meant to be touched.
+const RAMP_IN = 0.10; // "mostly coarse"
+const RAMP_FULL = 0.80; // "all coarse + all sparse + ~50% medium"
+const RAMP_MED_TOP = 0.50; // ...the "~50% medium" of that stop
+const RAMP_MED_IN = 0.45; // medium enters halfway between the two published stops
+// A pedestal under the sparse layer so a birth edge is broken by flecks rather
+// than being a smooth 2.99 m contour. With w = (1, 0.25, 0) the sparse layer
+// holds 0.0625/1.0625 = 5.9% of the composite variance, which is still "mostly
+// coarse" by any reading.
+const RAMP_SPARSE_MIN = 0.25;
+// Clip on the inverted cellular's LONG side, in field units. F1 = min(|x-p|/r)
+// is bounded below by 0 and unbounded above, so inverted it has a long LOW tail
+// that detailTexture never measured (its header measures the other one).
+// Unclipped, a cell-wall texel contributes about -2.7 sigma to the composite on
+// its own at full ramp and punches a hole straight through a solid cap on the
+// 74 cm lattice. The clip lifts the mean by a small fraction of a sigma and
+// shrinks the std slightly, both negligible against a ~2 sigma cut and both in
+// the strict direction.
+const SPARSE_CLIP = -2.0 * CARVE_STD1;
+// Measured area trim on the composite's contrast. 1.0 = the derived value, i.e.
+// contrast matched to the SHIPPED composite at the same footprint and the same
+// cov, which makes the calibrated 0.60/0.42/0.15 cut area-neutral by
+// construction rather than by argument. Move THIS, never params.foamThreshold,
+// if a coverage measurement drifts: the threshold sets generation and is
+// calibrated against Monahan & O'Muircheartaigh 1980.
+const CARVE_TRIM = 1.0;
+
+// --- foam tonal ladder by age ----------------------------------------------
+// Foam is not white and does not stay bright: fresh multilayer caps reflect
+// ~0.50 of the visible (Whitlock, Bartlett & Gurganus 1982, layers >0.1 m
+// against a 94-99% BaSO4 standard; Dierssen 2019 gives 0.4-0.5 on actively
+// breaking foam) and Koepke 1984 followed individual whitecaps from 0.20-0.55
+// at formation down to 0.03-0.10 within ~10 s. Reul & Chapron 2003's thickness
+// classes are the scaffolding: fresh cap = a metres-thick opaque air-water
+// mixture, trail = tens-of-cm static foam, late film = a ~1 mm emulsive
+// monolayer. One flat saturated white for both a breaking cap and a
+// four-second wake is the single biggest reason this foam read as plaster.
+//
+// THE LADDER IS RELATIVE, NOT AN ABSOLUTE ALBEDO, and the LEVEL is deliberately
+// NOT budgeted under Khronos PBR Neutral's knee. Two reasons. (a) This renderer
+// paints water as mix(body + glow, skyColor(R), fres) with REFL_CEIL and a
+// chroma push, not as albedo x irradiance, so an absolute 0.22 effective albedo
+// times a stand-in irradiance has no calibrated relationship to the sea beside
+// it — and at the grazing angles most foam is seen from it lands whitecaps
+// DARKER than the water. (b) The measured budget does not exist: R > 200 in the
+// calibration probe needs 0.515 pre-exposure and the pre-exposure identity
+// limit is 0.8/1.2 = 0.667, so the whole span from "reads as a whitecap" to
+// "at the knee" is a factor of 1.29. A ladder that fits inside it is invisible;
+// a ladder that does not fit drops most of the calibrated foam population out
+// of the frame. So tone 1.0 means "the freshest solid cap", it lands near where
+// today's foam already lands, and the ladder runs DOWN from there over the ~2:1
+// span the dossier's own 1.0/0.85/0.8/0.58/0.5 rungs occupy. The top rung
+// compresses in the knee exactly as today's flat white already does; every rung
+// below it is uncompressed and separates cleanly.
+//
+// AGE. (1 - turb) IS the accumulator's own exponential: maps.js recovers
+// foaminess as f = max(inject, f_prev*exp(-dt/tau)), so u = 1 - turb falls by e
+// every tau seconds from whatever depth the last break left, and u^4 is a
+// front-loaded exponential in age (u 0.95 -> 0.81, 0.90 -> 0.66, 0.80 -> 0.41)
+// that is scale-invariant across cascades because tau scales with breaker phase
+// speed for area and albedo alike.
+//
+// It is REMAPPED onto a display range [AGE_END, 1], not allowed to reach
+// u_death^4 = 0.214. Two reasons, both measured. (a) `coverage` is ALREADY
+// fading to zero as u falls to 1 - foamThreshold, so a tone that also falls to
+// 0.214 there double-counts the fade. (b) The accumulator is a running max of
+// the instantaneous injection with a slow release (at 60 fps with tau = 3.9 s
+// the recovery term moves only 0.43% per frame), so it steps instantly on a
+// reset; du^4/du = 4 at u = 1 would put a ~2.2x single-frame pop in phase with
+// the alpha step, against 1.45x today. Narrowing the range cuts that to 1.4x.
+const AGE_U_DEATH4 = (1 - 0.32) ** 4; // 0.2138. RECOMPUTE IF foamThreshold MOVES
+const AGE_END = 0.72; // relative tone at the moment the mask lets go
+// Far field. Cascade 1's texel is 144/256 = 0.5625 m and the accumulator tap
+// has no explicit LOD, so past some footprint u is a bilinear lottery and u^4
+// amplifies it fourfold. Do NOT fix this with .level() on the turb tap — that
+// would change cov and therefore AREA. The fade starts at TWO texels rather
+// than one because maps.js's spatial dissipation now band-limits the
+// accumulator itself: it is diffused by 2.0-2.7 texels over one e-folding time,
+// so at a 1-2 texel footprint the tap is resolving real structure and not a
+// lottery. That is worth stating because it is a genuine interaction — with the
+// accumulator un-blurred these two constants have to halve. AGE_FAR_HI is 8
+// texels; the dossier's whitecap patch mode is 8-16 m^2, i.e. 2.8-4.5 m across,
+// so past ~4.5 m the area average is the only meaningful answer.
+const AGE_FAR_LO = 1.125;
+const AGE_FAR_HI = 4.5;
+// THICKNESS WITHIN THE RAFT. Deliberately NOT "distance past fEdge + 0.15":
+// that quantity becomes a deterministic function of cov once the carve
+// mip-flattens, and it bottoms out at exactly the cov contour where flattened
+// foam first reaches alpha 1 — dark blotches where distant whitecaps should be.
+// Centred on the baked mean over +/-2 sigma of a SINGLE channel instead, so
+// there is no weighted-sum std shrinkage to get wrong and a mip-flattened tap
+// degrades to exactly 0.5, i.e. to the factor's own mean, which is the
+// constraint-4 answer by construction. Read off the FINE tap (29 cm grain) so
+// the modulation is finer than a raft: the coarse 17 m field would darken and
+// brighten whole GROUPS of caps, the dossier's patch mode being only 2.8-4.5 m
+// across. Whitlock's single bubble layer reflects ~0.2 of the multilayer figure
+// and Dierssen 2019's residual stage-B foam is 0.18/0.50 = 0.36 of it, which is
+// the licence to modulate brightness by the lace texture at all; the physical
+// ratio is not survivable on this display span, so LACE_MIN is that ratio
+// shallowed onto it. It never touches alpha or silhouette, so foam AREA is
+// bit-identical and the Monahan & O'Muircheartaigh calibration still holds.
+const LACE_MEAN = 0.4089;
+const LACE_HALF = 2 * 0.1328; // 2 sigma, one channel, no root-sum-square shrink
+const LACE_MIN = 0.78;
+// Safety floor on the product; with the ranges above it never binds
+// (0.72*0.78 = 0.562) and exists so a threshold change cannot drive tone to 0.
+const TONE_FLOOR = 0.45;
+// The far-field area answer: coverage-weighted mean remapped age (~0.87) times
+// laceF at its own mean (0.78 + 0.22*0.5 = 0.89). Continuous with the modal
+// near-field cap, so nothing pops at the fade boundary.
+const TONE_FAR = 0.78;
+// The irradiance term, unchanged in RATIO from the foamLight it replaces —
+// 0.55 standing in for Esky/pi and 0.60 for Lsun/pi, which is Dupuy & Bruneton
+// 2012's l = (Lsun*max(dot(N,L),0) + Esky)/pi with an ambient floor.
+const FOAM_AMB = 0.55;
+const FOAM_SUN = 0.60;
+// The standard wrap, diffuse = max(0, (N.L + w)/(1 + w)) (GPU Gems ch.16,
+// worked example w = 0.2; the aerated-foam band is 0.2-0.4, so this is its
+// centre), so the shadow side of a cap keeps its shape instead of flattening
+// onto the ambient floor.
+const FOAM_WRAP = 0.30;
+// The grazing forward lobe. Goniometer measurements (Infrared Physics &
+// Technology 2025) find a forward-scattering peak rising above the
+// quasi-Lambertian background as incidence grows, with peak height growing
+// about linearly with layer thickness, while the medium stays dominantly
+// diffuse (Kokhanovsky B = 2.3). A quarter of the direct term is the most that
+// reading supports, and the min() it feeds bounds it absolutely.
+const FOAM_FWD = 0.15;
+// Safety net on the peak, pre-exposure: normalise rather than clamp so hue
+// survives if the colour picker is dragged somewhere the level did not cover.
+// Sits just above today's own peak (foamColor.b 0.813 x 1.15 x 1.30 = 1.07), so
+// it does not bite on the shipped swatch — it is a guard, not the budget.
+const FOAM_CEIL = 1.05;
+// Spectrally flat at the surface, but as foam ages, wets and thins the photon
+// path crosses more liquid water and the red goes first: 0.889 at 670 nm in the
+// Frouin, Schwindling & Deschamps 1996 whitecap factors NASA processing
+// adopted (1.0 through 555 nm, 0.889 at 670, 0.760 at 765). The green-cyan of a
+// SUBMERGED plume is a different mechanism and lives on the milkiness term.
+const FOAM_RED_AGED = 0.889;
+// How much of the water's BROAD specular comes back through an aged film. A
+// fresh cap is a metres-thick opaque air-water mixture, which is why caps read
+// matte against a glinting sea; a late ~1 mm emulsive monolayer IS a water film
+// with a Fresnel interface. Only the broad lobe: the boosted glint term is
+// 0.5*SPEC_MAX*specBoost and specBoost is 12.0 under the DEFAULT midday sky, so
+// returning it would make a trail-band raft the brightest thing in the frame
+// and erase the whole ladder — the exact "glint punches through the raft"
+// failure the dossier names. Gated on AGE alone, never on the thickness axis: a
+// fresh cap is opaque however lacy its carve texel happens to be.
+const FOAM_SPEC_FILM = 0.5;
+
+// --- submerged bubble plume, milkiness, and the scud apron ------------------
+// A whitecap sits ON an aerated column: a plume of bubbles that brightens and
+// desaturates the water under and BEYOND the visible white, so there is no
+// clean boundary anywhere. Crest renders that as two layers (an opaque surface
+// raft plus a transmissive, parallaxed sub-surface bubble layer), War Thunder
+// adds milkiness to the refraction, Uncharted uses foam to reduce apparent
+// water depth. All three act on the WATER, which is why the block below runs
+// before the raft is composited.
+//
+// NOT attempted here, and it is a measured refusal: a WIDE plume dilated out of
+// foamRough. foamRough is the mip-3 MEAN of the accumulator passed through the
+// SAME threshold, so averaging pushes it toward the unfoamed value and the
+// threshold zeroes it — it is an EROSION filter, nonzero only inside large
+// dense rafts where cov has already clipped to 1, not a dilation. The reach
+// past the white edge comes from the apron below, which is measurable, and from
+// maps.js's spatial dissipation, which widens the accumulator itself.
+const DETAIL_N = 512; // makeDetailTexture's default; the material never sees the
+// texture's dimensions, so keep this in step with main.js's call
+// Dierssen 2019: thin residual foam reflects ~18% against 40-55% for a fresh
+// raft. Plume and film are the RAFT'S OWN swatch taken down by that ratio, so
+// shading.foamColor still drives all three layers.
+const SCUD_TONE = 0.18 / 0.475; // 0.379
+// Crest gives its bubble layer no sun term (it is inside the water), which
+// leaves a sunlit plume flat. What the raft does not reflect it passes down,
+// fully diffused: 1 minus Dierssen's 47.5% mid.
+const BUB_SUN_T = 1 - 0.475; // 0.525
+// The column the milkiness is seen through, in metres, fed to the same muWater
+// the crest glow uses. LIP_TIP (0.60 m) is a warm near-white off those
+// coefficients and LIP_BASE (3.00 m) a jade green; a plume is neither — a pale
+// sea-green — so the geometric mean brackets it. Jerlov 1C gives exp(-mu*d) =
+// (0.563, 0.814, 0.751), 3C (0.532, 0.765, 0.624): desaturated, faintly green,
+// greener when turbid. This IS the Uncharted apparent-depth cue — under foam
+// the water transmits a 1.34 m column instead of the deep body.
+const MILK_PATH = Math.sqrt(LIP_TIP * LIP_BASE); // 1.342 m
+// Crest's parallaxed sub-surface layer: offset the lookup by -k*V.xz/V.y so the
+// bubble cloud sits below the surface plane and slides against the white lace
+// as the camera moves. That differential slide is the whole depth cue and it
+// costs exactly one tap. A TRANSLATION, not a rotation, and bounded, so it
+// cannot shear with |worldXZ| on the 20 km radial grid.
+const BUB_DEPTH = 0.12; // m of fake depth — the dossier's k = 0.05-0.15
+// Clamp on the parallax denominator: bounds the offset at 5*BUB_DEPTH = 0.60 m.
+// V.y and NOT dot(N, V): N carries the capillary ripple and cascade 2's 9 cm
+// texels, and d(offset)/d(NoV) = -k|V.xz|/NoV^2 is 1.3 m per unit at NoV = 0.3,
+// so a normal-derived denominator would grain the plume for nothing. V.y is
+// vertex-interpolated, smooth, and the correct flat-plane denominator anyway.
+const BUB_VY_MIN = 0.20;
+// B's measured feature diameter is 0.176 of a tile, so a 5.3 m tile delivers
+// 0.93 m patches — plume scale, not the 0.29 m lace the carve's fine tap
+// carries. Non-harmonic with both carve tiles (5.3/3.681 = 1.44, 17/5.3 = 3.21).
+const BUB_TILE = 5.3;
+const BUB_LOD_MIN = 3.0; // Crest forces mip 3 so the layer reads as cloud, not lace
+// plume = clamp(1 + C*(bub - mean)/std, 0, 1.9). Mean preserved at exactly 1,
+// so the texture cannot move average aeration; +/-2 sigma give 1.90 and 0.10, a
+// torn cloud that closes to nothing in its low tail. NOT saturate(): saturate
+// would clip the whole upper tail to a flat 1.0 — half the texture — and drop
+// the mean to 0.82. `aer` is saturated AFTER the multiply instead, which is
+// mandatory: an unclamped weight of 1.18 makes mix() EXTRAPOLATE, and over a
+// glint at 3.0 linear that returns negative radiance into the tonemapper.
+// Degrades to exactly 1.0 when a grazing footprint flattens the tap.
+const BUB_CONTRAST = 0.45;
+const BUB_PLUME_MAX = 1.9;
+// The apron: the SAME dissolve field, one threshold lower and one window wider
+// — the Sea of Thieves read that the trail is the same substance as the cap,
+// only diffused and at lower alpha, never a separate hard-edged texture.
+// 1.6 sigma down puts the onset at the field's own mean about where the white
+// cap first becomes visible, so a fold too weak to whiten still lays down grey.
+// Stated in the SHIPPED composite's sigma (0.1328*hypot(0.62,0.38) = 0.0966),
+// which is what the carve is contrast-matched to.
+const APRON_DROP = 1.6 * 0.1328 * Math.hypot(0.62, 0.38); // 0.1545
+const APRON_SPAN = 2 * 0.15; // the low end of the dossier's "scud: 2-3x wider"
+const APRON_COV_GAIN = 2 * 2.4; // full strength at cov 0.208 vs the white's 0.417
+// A thin translucent film is an alpha lerp at LOW opacity, never a replacement:
+// the dark water and its roughened specular have to read through the holes.
+// Composited toward an 18%-reflectance tone this both LIFTS dark water and
+// DARKENS a glinting or sky-bright pixel, which is the scud-over-dark-water
+// case, and the alpha lerp does it with no branch and no second BRDF.
+const APRON_ALPHA = 0.40;
+// ...faded out past the coarse field's own feature diameter (0.176*17 m). The
+// carve mip-flattens to CARVE_MEAN with distance while the apron's threshold
+// keeps sliding down with cov, so without this the tail survives from cov 0.087
+// where the white needs 0.455 and paints a structureless grey veil over the far
+// sea — the snowfield failure params.js already calls out.
+const APRON_FOOT = 3.0;
+// Floor under the film's occlusion. litScud carries skyVis*groupOcc, which in a
+// trough floors at 0.34*0.50 = 0.17 — so without this the trail would vanish in
+// exactly the hollows where real scud collects. Not removed entirely: the
+// occlusion is what keeps a film in a hollow from reading as white paint on
+// dark water.
+const SCUD_OCC_MIN = 0.45;
+
 export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, detailTex }) {
   const mat = new MeshBasicNodeMaterial();
   // Plane is authored in XY and remapped to XZ in positionNode, flipping the
@@ -577,9 +981,19 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
       const c0 = texture(detailTex, uv).toVar();
       const cx = texture(detailTex, uv.add(vec2(e, 0))).toVar();
       const cy = texture(detailTex, uv.add(vec2(0, e))).toVar();
-      return vec2(
+      // xy is the ripple slope off the HEIGHT channels, unchanged. zw is the
+      // foam micro-relief slope off the CELLULAR pair, from these same three
+      // taps and therefore free — see FOAM_RELIEF_FINE. High cellular means far
+      // from a feature point, so with the same sign convention as xy the walls
+      // between bubbles stand proud and the holes sit low, which is the same
+      // low tail detailTexture.js already earmarks for foam holes. Differencing
+      // also means the baked TARGET_MEAN cancels exactly, so a weighted sum of
+      // DIFFERENCES has mean 0 by construction whatever the weights.
+      return vec4(
         cx.b.sub(c0.b).add(cx.a.sub(c0.a).mul(RIPPLE_FINE)),
         cy.b.sub(c0.b).add(cy.a.sub(c0.a).mul(RIPPLE_FINE)),
+        cx.r.sub(c0.r).add(cx.g.sub(c0.g).mul(FOAM_RELIEF_FINE)),
+        cy.r.sub(c0.r).add(cy.g.sub(c0.g).mul(FOAM_RELIEF_FINE)),
       ).toVar();
     };
     // Two octaves an octave-and-a-bit apart, each fading out at its own
@@ -591,8 +1005,21 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     const fadeB = saturate(float(RIPPLE_FOOT / RIPPLE_OCT).div(footprint)).toVar();
     const gradA = rippleGrad(RIPPLE_TILE, vec2(t.mul(0.035), t.mul(0.022)));
     const gradB = rippleGrad(RIPPLE_TILE * RIPPLE_OCT, vec2(t.mul(-0.09), t.mul(0.06)));
-    const detail = gradA.mul(fadeA).add(gradB.mul(RIPPLE_OCT_AMP).mul(fadeB))
+    const detail = gradA.xy.mul(fadeA).add(gradB.xy.mul(RIPPLE_OCT_AMP).mul(fadeB))
       .mul(RIPPLE_GAIN).mul(shading.detail).toVar();
+    // The foam micro-relief slope rides the same two tap sets and, because the
+    // cellular feature diameters were matched to the fbm channels beside them,
+    // the same two footprint fades — weighted the other way round, fine set
+    // leading, because 3.5-8 cm is bubble scale. Normalised to unit
+    // per-component rms so the use site can be written in sigma. Grazing
+    // degradation is free: fadeA/fadeB are built from the same anisotropy-aware
+    // footprint as everything else here, and a mip-flattened cellular tap
+    // differences to exactly 0, so the failure mode is "no relief", not
+    // garbage. Deliberately NOT scaled by shading.detail: that dial is the
+    // water's own capillary ripple (default 0.1, essentially a dither) and foam
+    // relief is a different physical thing that must not switch off with it.
+    const reliefGrad = gradB.zw.mul(fadeB)
+      .add(gradA.zw.mul(FOAM_RELIEF_OCT).mul(fadeA)).mul(FOAM_RELIEF_NORM).toVar();
     // The texture has mips so it self-filters; these fades are only so the slope
     // they lose lands in the roughness budget like everything else.
     lostVar.addAssign(shading.detail.mul(shading.detail)
@@ -1003,9 +1430,19 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // swings inside one pixel cannot hold a narrow lobe, and letting it try is
     // what printed the warm speckle tracing wave contours in the away shots.
     const nVar = fwidth(N.x).add(fwidth(N.z)).toVar();
+    // Foam raises roughness (ATLAS; War Thunder's energy-modulated milkiness is
+    // the same idea in the refraction term): a bubble film is a diffuse
+    // scatterer, so glints over foam broaden and dim rather than mirroring the
+    // sun. Nearly free and missing from most hobby ocean renderers. Read at a
+    // coarse mip from the mid cascade — this only needs to know "is there foam
+    // around here", and it is wanted BEFORE the foam block computes coverage.
+    const foamRough = saturate(shading.foamThreshold.sub(
+      texture(cascades[1].displacement, worldXZ.div(lengthScales[1])).level(float(3)).w)
+      .mul(shading.foamScale)).toVar();
     const roughSpec = min(max(sqrt(rough.mul(rough)
       .add(saturate(viewDist.div(SPEC_SPREAD_RANGE)).mul(SPEC_SPREAD))
-      .add(saturate(nVar.mul(SPEC_AA_VAR)).mul(0.06))),
+      .add(saturate(nVar.mul(SPEC_AA_VAR)).mul(0.06))
+      .add(foamRough.mul(0.22))),
     float(SPEC_ROUGH_MIN)), float(SPEC_ROUGH_MAX)).toVar();
     const a2 = roughSpec.mul(roughSpec).mul(roughSpec).mul(roughSpec).toVar();
     const NoH = saturate(dot(N, Hv)).toVar();
@@ -1017,7 +1454,15 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     const stBase = mix(vec3(shading.sunColor), vec3(1), float(SPEC_WHITE)).toVar();
     const stL = dot(stBase, vec3(0.2126, 0.7152, 0.0722));
     const specTint = mix(stBase, vec3(stL), saturate(nVar.mul(3)).mul(SPEC_AA_DESAT));
-    water.addAssign(specTint.mul(ggx.div(ggx.add(SPEC_KNEE)).mul(SPEC_MAX)).mul(fresSpec));
+    // The broad lobe is CAPTURED rather than added straight into the water,
+    // because the foam block below needs it separately: an aged ~1 mm film lets
+    // the water's own mirror back through and a metres-thick fresh cap does
+    // not. `water` receives the identical value on the next line, so nothing
+    // about the open sea changes. The BOOSTED GLINT line below is deliberately
+    // NOT captured — see FOAM_SPEC_FILM.
+    const specBroad = specTint.mul(ggx.div(ggx.add(SPEC_KNEE)).mul(SPEC_MAX))
+      .mul(fresSpec).toVar();
+    water.addAssign(specBroad);
     // Per-sky glint energy, gated to NEAR-MIRROR facets only. Glint is ~2%
     // (Fresnel) of the SOLAR DISC's radiance and the 8-bit reconstruction is
     // orders below a real disc — under the low golden sun the grazing Fresnel
@@ -1032,31 +1477,230 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // foam on real crest-folds only (skip the finest cascade's constant
     // speckle): the accumulated-Jacobian turbulence rides displacement.w
     const foamRaw = float(0).toVar();
+    // ...and the same taps carry the foam's AGE. min() across cascades is the
+    // deepest, freshest break, which is exactly the "a new break over old foam
+    // wins" semantics maps.js's own max() on foaminess has — age is not
+    // additive the way coverage is, so this is a min while foamRaw stays a sum.
+    // No extra sample: forcing `turb` to a Var pins each cascade to one fetch.
+    const turbMin = float(1).toVar();
     cascades.forEach((c, i) => {
       if (i >= cascades.length - 1) return;
-      const turb = texture(c.displacement, worldXZ.div(lengthScales[i])).w;
+      const turb = texture(c.displacement, worldXZ.div(lengthScales[i])).w.toVar();
+      turbMin.assign(min(turbMin, turb));
       foamRaw.addAssign(saturate(shading.foamThreshold.sub(turb).mul(shading.foamScale)));
     });
     // the macro envelope keeps tile copies from foaming identically
     const cov = saturate(foamRaw.mul(envC).mul(envC)).toVar();
 
-    // fbm-carved mask, the classic dissolve: the threshold rides the coverage,
-    // so foam is born as lacy fbm islands on a fresh fold, merges toward a
-    // solid cap as coverage rises, and dies back into lace as the turbulence
-    // recovers. Two scales of the baked fbm (17 m and 3.4 m), slowly drifting.
-    const fA = texture(detailTex, worldXZ.div(17).add(vec2(t.mul(0.012), t.mul(0.008)))).b;
-    const fB = texture(detailTex, worldXZ.div(3.4).add(vec2(t.mul(-0.02), t.mul(0.015)))).a;
-    const fbm = fA.mul(0.62).add(fB.mul(0.38)).toVar();
+    // --- the carve: de-tiled, and decoded AC3-style -------------------------
+    // The classic dissolve, still: the threshold rides the coverage, so foam is
+    // born as lace on a fresh fold, merges toward a solid cap as coverage
+    // rises, and dies back into lace as the turbulence recovers. What changed
+    // is WHERE the lace is and WHICH lace it is — see the CARVE_ and RAMP_
+    // blocks above. Everything here is a STATIC world field with slow drift, so
+    // nothing in it can blink; cov comes from the accumulator in
+    // displacement.w and remains the only memory, and the only owner of AREA.
+    //
+    // 1. The DOMAIN WARP, read unwarped and biased by the channel mean so it
+    //    vanishes to (0, 0) rather than to a constant when the tap mip-flattens
+    //    at grazing incidence. No .level() on purpose: the implicit mip IS the
+    //    graceful degradation. wy is decorrelated from wx because A is the B
+    //    field at doubled UV.
+    const wc = texture(detailTex, worldXZ.div(CARVE_WARP_TILE).add(0.23)).toVar();
+    const wx = wc.b.sub(CARVE_MEAN).toVar();
+    const wy = wc.a.sub(CARVE_MEAN).sub(wx.mul(CARVE_WARP_RHO)).mul(CARVE_WARP_ORTH);
+    const qc = worldXZ.add(vec2(wx, wy).mul(CARVE_WARP_AMP)).toVar();
+    // 2. The CONSTANT rotation, on the fine tap only — rotating both by
+    //    different constants is the same pattern under a global rotation, so
+    //    one angle is all the decorrelation there is to buy. Four multiplies
+    //    and two adds, no trig.
+    const qf = vec2(
+      qc.x.mul(CARVE_ROT_C).sub(qc.y.mul(CARVE_ROT_S)),
+      qc.y.mul(CARVE_ROT_C).add(qc.x.mul(CARVE_ROT_S)),
+    ).toVar();
+    // 3. NON-HARMONIC tiles, one fetch per scale held in a Var, so the fine
+    //    fetch feeds BOTH the sparse and the medium density for ONE sample.
+    //    That is what makes the three-density decode free.
+    const cCoarse = texture(detailTex, qc.div(CARVE_TILE_C)
+      .add(vec2(t.mul(0.012), t.mul(0.008)))).toVar();
+    const cFine = texture(detailTex, qf.div(CARVE_TILE_F)
+      .add(vec2(t.mul(-0.02), t.mul(0.015)))).toVar();
+    const fA = cCoarse.b.toVar(); // coarse density: 2.99 m fbm patch silhouette
+    const fB = cFine.g.toVar(); // medium density: 29 cm cellular grain
+    // The ramp itself: two smoothsteps on the accumulator depth and nothing
+    // else. cov descends from displacement.w, so the index HAS MEMORY — which
+    // stage a patch of foam is in cannot blink with an instantaneous criterion,
+    // and the weights are smooth in it, so stages cross-dissolve over seconds.
+    // Both fine weights carry the footprint fade, which is constraint 4: as the
+    // fine tile flattens toward CARVE_MEAN the weights go to zero and the field
+    // degrades to the coarse layer alone rather than to an over-divided
+    // constant.
+    const fineFade = saturate(float(CARVE_FOOT_F).div(footprint)).toVar();
+    const rampT = smoothstep(float(RAMP_IN), float(RAMP_FULL), cov).toVar();
+    const wSparse = mix(float(RAMP_SPARSE_MIN), float(1), rampT).mul(fineFade).toVar();
+    const wMed = smoothstep(float(RAMP_MED_IN), float(RAMP_FULL), cov)
+      .mul(RAMP_MED_TOP).mul(fineFade).toVar();
+    // Inverted cellular, with its long side clipped — see SPARSE_CLIP.
+    const sparseDev = max(float(CARVE_MEAN).sub(cFine.r), float(SPARSE_CLIP)).toVar();
+    const dev = fA.sub(CARVE_MEAN).add(sparseDev.mul(wSparse))
+      .add(fB.sub(CARVE_MEAN).mul(wMed)).toVar();
+    // CONTRAST-MATCHED TO THE SHIPPED COMPOSITE, at this same footprint and
+    // this same cov, which is what keeps the calibrated 0.60/0.42/0.15 cut
+    // area-neutral while the ramp rewrites the pattern underneath it. The AC3
+    // stack is ADDITIVE — its weights sum to 1.25 at the low stop and 2.5 at
+    // the high one — so summed unchanged the composite's mean would run
+    // 0.51 -> 1.02 and a fixed 0.60 cut would pass almost nothing at one end
+    // and everything at the other: the ramp would be a no-op and the calibrated
+    // area would be gone. Coarse holds weight 1 at both AC3 stops, so it is the
+    // unit the other two are measured in and sqrt(1 + wS^2 + wM^2) is the std
+    // of the sum. The shipped field's own std at the same footprint is
+    // sqrt(0.62^2 + (0.38*fineFade)^2) — 0.727 near, 0.62 once the fine tap has
+    // filtered out — and the ratio of the two is the gain. Far field the two
+    // expressions collapse to MEAN + 0.62*(coarse - MEAN), i.e. IDENTICAL to
+    // shipped. A weighted sum preserves the mean only when the weights sum to
+    // one and shrinks the std by sqrt(sum w^2) either way; getting that wrong
+    // is how a carve silently stops carving at one end of the ramp.
+    const sigMix = sqrt(wSparse.mul(wSparse).add(wMed.mul(wMed)).add(1)).toVar();
+    const sigShip = sqrt(fineFade.mul(fineFade).mul(CARVE_W_F * CARVE_W_F)
+      .add(CARVE_W_C * CARVE_W_C)).toVar();
+    const carve = dev.mul(sigShip.div(sigMix).mul(CARVE_TRIM)).add(CARVE_MEAN).toVar();
+    // The shipped literals, unchanged. In sigma of the field they cut, 0.60 is
+    // +1.98 sigma above its mean at cov 0, sweeping to -2.37 at cov 1, through
+    // a 1.55 sigma window.
     const fEdge = float(0.60).sub(cov.mul(0.42)).toVar();
-    const coverage = smoothstep(fEdge, fEdge.add(0.15), fbm)
+    const coverage = smoothstep(fEdge, fEdge.add(0.15), carve)
       .mul(saturate(cov.mul(2.4))).toVar();
 
-    // lit as a near-Lambertian surface, with a little of the coarse fbm left
-    // in the brightness so a cap reads as a raft rather than flat paint
-    const foamLight = float(0.55).add(saturate(dot(N, shading.sunDir)).mul(0.6));
-    const foamShaded = vec3(shading.foamColor).mul(foamLight)
-      .mul(fA.mul(0.55).add(0.78));
+    // --- the submerged bubble plume, and the apron past the white edge ------
+    // Three layers, and all of them act on `water` BEFORE the raft is
+    // composited, so the aerated water reads through the lace holes — Crest's
+    // two-layer model, where only the bubble layer is transmissive.
+    //
+    // NO FLICKER, BY CONSTRUCTION. Every driver has memory: `cov` is the
+    // accumulator through its threshold. Nothing reads an instantaneous
+    // lambda_min, a wave height, or any per-frame quantity without history. The
+    // one view-dependent term (the parallax) is continuous in V and bounded,
+    // and its denominator is V.y so it carries no per-pixel normal noise.
+    //
+    // OPEN WATER IS BIT-IDENTICAL: at cov = 0 both mix() weights are exactly 0.
+    const bubOff = vec2(V.x, V.z)
+      .mul(float(BUB_DEPTH).div(max(V.y, float(BUB_VY_MIN)))).toVar();
+    const bubUV = worldXZ.sub(bubOff).div(BUB_TILE)
+      .add(vec2(t.mul(-0.011), t.mul(0.007))).toVar();
+    // Footprint-driven LOD with Crest's forced mip 3 as a FLOOR: a soft cloud
+    // at any distance, and no aliasing once the footprint outruns the floor.
+    const bubLod = log2(footprint.div(BUB_TILE / DETAIL_N)).max(float(BUB_LOD_MIN)).toVar();
+    const plume = float(1).add(texture(detailTex, bubUV).level(bubLod).b
+      .sub(CARVE_MEAN).div(CARVE_STD1).mul(BUB_CONTRAST)).clamp(0, BUB_PLUME_MAX).toVar();
+    const aer = saturate(cov.mul(plume)).toVar();
+    // MILKINESS, in the water's own shading. The plume is INSIDE the water, so
+    // it is lit by the sky plus only what the raft above it passes down
+    // (BUB_SUN_T), occluded by the same trough walls and wave group the body
+    // is, and seen through a short column of the same muWater the crest glow
+    // uses — which is what makes it a pale sea-green rather than a grey wash,
+    // and what makes the water under foam read as SHALLOWER. It rides
+    // (1 - fres) because aeration is a TRANSMISSION effect: the sky reflected
+    // off the surface is not aerated, the water under it is.
+    const litBub = float(FOAM_AMB).add(sunN.mul(FOAM_SUN * BUB_SUN_T))
+      .mul(skyVis).mul(groupOcc).toVar();
+    const milkCol = vec3(shading.foamColor).mul(SCUD_TONE)
+      .mul(exp(muWater.mul(MILK_PATH).negate())).mul(litBub).toVar();
+    water.assign(mix(water, milkCol,
+      aer.mul(shading.foamMilk).mul(float(1).sub(fres))));
+
+    // THE SCUD APRON. The same dissolve field, one threshold lower and one
+    // window wider, faded out once the footprint outruns the field's own coarse
+    // feature size so the far sea gets nothing rather than a flat veil. Only
+    // the part that EXCEEDS the white is painted, which makes this a tail past
+    // every white edge and identically zero inside a solid cap.
+    const aEdge = fEdge.sub(APRON_DROP).toVar();
+    const apron = smoothstep(aEdge, aEdge.add(APRON_SPAN), carve)
+      .mul(saturate(cov.mul(APRON_COV_GAIN)))
+      .mul(saturate(float(APRON_FOOT).div(footprint))).toVar();
+    // A film sits ON the water: no water column and the raft's full sun weight,
+    // but the SAME sky occlusion (floored — see SCUD_OCC_MIN), which is what
+    // keeps a film in a hollow from reading as white paint on dark water.
+    const litScud = float(FOAM_AMB).add(sunN.mul(FOAM_SUN))
+      .mul(max(skyVis.mul(groupOcc), float(SCUD_OCC_MIN))).toVar();
+    const scudCol = vec3(shading.foamColor).mul(SCUD_TONE).mul(litScud).toVar();
+    // The extra (1 - coverage) is an AREA guard, not decoration: without it the
+    // tail brightens the water UNDER a partially covered raft, which is a
+    // second-order but real push on the calibrated bright-pixel count right at
+    // the lace edge.
+    water.assign(mix(water, scudCol,
+      saturate(apron.sub(coverage)).mul(float(1).sub(coverage)).mul(APRON_ALPHA)));
+
+    // --- foam tone: the ladder by age --------------------------------------
+    // AGE. ageU = 1 - turbMin is the accumulator's own exponential, so ageU^4
+    // is a front-loaded exponential in age; it is then REMAPPED onto
+    // [AGE_END, 1] rather than allowed to reach 0.214, because `coverage` is
+    // already fading to zero at the same moment and the accumulator steps
+    // instantly on a reset. Nothing instantaneous enters the graph — ageU
+    // inherits every bit of the accumulator's memory, which is what keeps this
+    // off the flicker path that raw lambda_min put a core term on earlier.
+    const ageU = saturate(float(1).sub(turbMin)).toVar();
+    const ageU2 = ageU.mul(ageU).toVar();
+    const ageRaw = ageU2.mul(ageU2).toVar();
+    const farF = saturate(footprint.sub(AGE_FAR_LO).div(AGE_FAR_HI - AGE_FAR_LO)).toVar();
+    // the physical age, far-faded to its area mean: drives the spectral rolloff
+    // and the film's transmission, both of which want the full 0..1 range
+    const ageP = mix(ageRaw, float(0.5), farF).toVar();
+    // ...and the display tone, on the narrowed range
+    const ageF = float(AGE_END).add(ageRaw.sub(AGE_U_DEATH4)
+      .mul((1 - AGE_END) / (1 - AGE_U_DEATH4))).clamp(AGE_END, 1).toVar();
+    // THICKNESS, centred on the baked mean over +/-2 sigma of the fine tap —
+    // see LACE_MIN. Degrades to exactly 0.5 when that tap mip-flattens.
+    const laceSolid = saturate(fB.sub(LACE_MEAN).div(LACE_HALF).mul(0.5).add(0.5)).toVar();
+    const laceF = mix(float(LACE_MIN), float(1), laceSolid).toVar();
+    // Age sets the raft's thickness class, the lace varies it inside — and the
+    // PRODUCT, not one factor, fades to the far-field area answer, so nothing
+    // downstream depends on a mip-flattened carve.
+    const foamTone = mix(max(ageF.mul(laceF), float(TONE_FLOOR)),
+      float(TONE_FAR), farF).toVar();
+
+    // Near-Lambertian, as every operational ocean-colour treatment models it:
+    // multiple scattering among 60-99% void-fraction bubble layers randomises
+    // direction efficiently. Two corrections only — the wrap, so the shadow
+    // side of a cap keeps its shape instead of flattening onto the ambient
+    // floor, and the grazing forward lobe. `fwd` is the peak-normalised
+    // Henyey-Greenstein lobe the crest glow already built and it is the right
+    // geometry unchanged: V is surface->camera, so dot(V, -sunDir) peaks on a
+    // BACK-LIT facet, which is where a forward lobe lives. Reused, so free.
+    const foamWrap = saturate(dot(N, shading.sunDir).add(FOAM_WRAP).div(1 + FOAM_WRAP)).toVar();
+    const foamSunT = min(foamWrap.mul(FOAM_SUN)
+      .add(fwd.mul(float(1).sub(NoV)).mul(ageF).mul(FOAM_FWD)), float(FOAM_SUN)).toVar();
+    // MICRO-RELIEF, as a bounded multiplicative modulation of the finished foam
+    // brightness rather than a perturbed normal — see FOAM_RELIEF_FINE for why
+    // it stays out of the specular and out of saturate(dot(Nf, L)). Mean 1 and
+    // bounded, so it commutes with every tone rung above it and cannot move the
+    // top of the HDR range by more than its own fraction.
+    const reliefLit = dot(vec3(reliefGrad.x.negate(), 0, reliefGrad.y.negate()),
+      shading.sunDir).clamp(-FOAM_RELIEF_CLAMP, FOAM_RELIEF_CLAMP)
+      .mul(shading.foamRelief).toVar();
+    // Foam is spectrally flat white at the surface, so the swatch supplies HUE
+    // and shading.foamBright supplies the LEVEL. Same unit-luminance idiom
+    // shadowTint uses on the water. Consequence worth knowing: the GUI's foam
+    // picker is now a hue control and 'brightness' is the level dial.
+    const foamHue = vec3(shading.foamColor).toVar();
+    foamHue.assign(foamHue.div(max(dot(foamHue, vec3(0.2126, 0.7152, 0.0722)), float(1e-4))));
+    const foamShaded = foamHue
+      .mul(mix(vec3(1), vec3(FOAM_RED_AGED, 1, 1), float(1).sub(ageP)))
+      .mul(foamTone.mul(shading.foamBright))
+      .mul(float(FOAM_AMB).add(foamSunT).mul(float(1).add(reliefLit))).toVar();
+    // The peak is NORMALISED, not clamped, so hue survives — a guard against
+    // the colour picker being dragged past what the level budgeted for, not the
+    // budget itself. See FOAM_CEIL.
+    const foamPeak = foamShaded.r.max(foamShaded.g).max(foamShaded.b).toVar();
+    foamShaded.mulAssign(min(float(1), float(FOAM_CEIL).div(max(foamPeak, float(1e-4)))));
     const surface = mix(water, foamShaded, coverage).toVar();
+    // The water's own BROAD specular, back through a thin film. mix() has
+    // already removed `coverage` of it; this returns the share a film of this
+    // AGE transmits — nothing on a fresh cap, up to half through a late
+    // monolayer. The boosted glint term is NOT returned. foamRough has already
+    // broadened what does come back, which is exactly right for a mirror seen
+    // through curved bubble film. Old foam sheens, fresh foam does not.
+    surface.addAssign(specBroad.mul(coverage)
+      .mul(float(FOAM_SPEC_FILM).mul(float(1).sub(ageP))));
 
     // A crest can swallow a deck-height camera. The sheet is DoubleSide, so that
     // frame is drawn from underneath — and looking UP through water is the one
