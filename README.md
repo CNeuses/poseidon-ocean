@@ -11,7 +11,7 @@
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
 
-![Golden-hour sea from a ship's rail](docs/img/hero.jpg)
+![The app running in Chrome: the sea under the midday rig, with the tuning panel open](docs/img/hero.jpg)
 
 ## Run
 
