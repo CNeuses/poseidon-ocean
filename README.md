@@ -15,10 +15,6 @@
   <img src="docs/img/hero-golden-hour.jpg" alt="Golden-hour sea from just above the water, a crest breaking mid-frame">
 </p>
 
-<p align="center">
-  <i>Real time, one frame, no post: 794k vertices of radial grid running to a 20 km horizon.</i>
-</p>
-
 ## Run
 
 ```bash
@@ -59,7 +55,7 @@ bottom-left switch sea palette (tropical green ↔ open-ocean blue) and sky rig
       <b>Sun glitter.</b> GGX with a knee, over a sun reconstructed from the panorama's clipped disc.
     </td>
     <td width="50%" valign="top">
-      <img src="docs/img/whitecaps-near-field.jpg" alt="Whitecaps across the near field"><br>
+      <img src="docs/img/whitecaps-crest.jpg" alt="A solid white cap along a crest at golden hour"><br>
       <b>Whitecaps.</b> Foam where the displacement Jacobian folds, with build/decay so caps linger and streak downwind.
     </td>
   </tr>
