@@ -54,31 +54,31 @@ bottom-left switch sea palette (tropical green ↔ open-ocean blue) and sky rig
 
 <table>
   <tr>
-    <td width="50%">
+    <td width="50%" valign="top">
       <img src="docs/img/sun-glitter.jpg" alt="Sun glitter path at golden hour"><br>
       <b>Sun glitter.</b> GGX with a knee, over a sun reconstructed from the panorama's clipped disc.
     </td>
-    <td width="50%">
+    <td width="50%" valign="top">
       <img src="docs/img/whitecaps-near-field.jpg" alt="Whitecaps across the near field"><br>
       <b>Whitecaps.</b> Foam where the displacement Jacobian folds, with build/decay so caps linger and streak downwind.
     </td>
   </tr>
   <tr>
-    <td>
+    <td width="50%" valign="top">
       <img src="docs/img/subsurface-scatter.jpg" alt="A crest lit from behind, glowing green"><br>
       <b>Subsurface scatter.</b> A thin lip goes warm, a thick one jade, off one exponential over a refracted path.
     </td>
-    <td>
+    <td width="50%" valign="top">
       <img src="docs/img/wave-field.jpg" alt="The wave field seen from 90 m up"><br>
       <b>Wave field.</b> Three cascades on disjoint wavenumber bands: swell and ripple without visible tiling.
     </td>
   </tr>
   <tr>
-    <td>
+    <td width="50%" valign="top">
       <img src="docs/img/palette-open-ocean-blue.jpg" alt="Open-ocean blue palette"><br>
       <b>Open-ocean blue.</b> Jerlov absorption and scattering, not a tinted swatch.
     </td>
-    <td>
+    <td width="50%" valign="top">
       <img src="docs/img/palette-tropical-green.jpg" alt="Tropical green palette"><br>
       <b>Tropical green.</b> Same water model, different inherent optical properties.
     </td>
