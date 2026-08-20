@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/img/hero.jpg" alt="Golden-hour sea from just above the water, a crest breaking mid-frame">
+  <img src="docs/img/hero-golden-hour.jpg" alt="Golden-hour sea from just above the water, a crest breaking mid-frame">
 </p>
 
 <p align="center">
@@ -55,31 +55,31 @@ bottom-left switch sea palette (tropical green ↔ open-ocean blue) and sky rig
 <table>
   <tr>
     <td width="50%">
-      <img src="docs/img/glitter.jpg" alt="Sun glitter path at golden hour"><br>
+      <img src="docs/img/sun-glitter.jpg" alt="Sun glitter path at golden hour"><br>
       <b>Sun glitter.</b> GGX with a knee, over a sun reconstructed from the panorama's clipped disc.
     </td>
     <td width="50%">
-      <img src="docs/img/whitecaps.jpg" alt="Whitecaps across the near field"><br>
+      <img src="docs/img/whitecaps-near-field.jpg" alt="Whitecaps across the near field"><br>
       <b>Whitecaps.</b> Foam where the displacement Jacobian folds, with build/decay so caps linger and streak downwind.
     </td>
   </tr>
   <tr>
     <td>
-      <img src="docs/img/subsurface.jpg" alt="A crest lit from behind, glowing green"><br>
+      <img src="docs/img/subsurface-scatter.jpg" alt="A crest lit from behind, glowing green"><br>
       <b>Subsurface scatter.</b> A thin lip goes warm, a thick one jade, off one exponential over a refracted path.
     </td>
     <td>
-      <img src="docs/img/wavefield.jpg" alt="The wave field seen from 90 m up"><br>
+      <img src="docs/img/wave-field.jpg" alt="The wave field seen from 90 m up"><br>
       <b>Wave field.</b> Three cascades on disjoint wavenumber bands: swell and ripple without visible tiling.
     </td>
   </tr>
   <tr>
     <td>
-      <img src="docs/img/sea-blue.jpg" alt="Open-ocean blue palette"><br>
+      <img src="docs/img/palette-open-ocean-blue.jpg" alt="Open-ocean blue palette"><br>
       <b>Open-ocean blue.</b> Jerlov absorption and scattering, not a tinted swatch.
     </td>
     <td>
-      <img src="docs/img/sea-green.jpg" alt="Tropical green palette"><br>
+      <img src="docs/img/palette-tropical-green.jpg" alt="Tropical green palette"><br>
       <b>Tropical green.</b> Same water model, different inherent optical properties.
     </td>
   </tr>
