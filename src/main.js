@@ -85,6 +85,10 @@ async function main() {
 
   // FFT isolation test (hard gate)
   const fftTest = await validateFFT(renderer, params.N);
+  window.__poseidonValidation = {
+    backendWebGPU: renderer.backend.isWebGPUBackend === true,
+    fft: fftTest,
+  };
   const fftStr = `FFT self-test: ${fftTest.pass ? 'PASS ✓' : 'FAIL ✗'} (impulse=${fftTest.err1.toExponential(1)}, freq=${fftTest.err2.toExponential(1)})`;
   if (!fftTest.pass) hud.error(fftStr + ' — IFFT not matching analytic result.');
 

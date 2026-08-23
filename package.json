@@ -1,20 +1,43 @@
 {
-  "name": "fft-ocean-claude",
-  "private": true,
+  "name": "@fantasai/poseidon-ocean",
+  "description": "Reusable Three.js WebGPU spectral ocean runtime extracted from Poseidon.",
   "license": "MIT",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "types": "./src/index.d.ts",
+  "files": [
+    "src/index.js",
+    "src/index.d.ts",
+    "src/config.js",
+    "src/runtime.js",
+    "src/ocean",
+    "LICENSE",
+    "NOTICE.md",
+    "README.md"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:webgpu": "node tools/test-webgpu.mjs",
+    "capture:golden": "node tools/test-webgpu.mjs --capture"
   },
-  "dependencies": {
-    "lil-gui": "^0.20.0",
-    "three": "0.184.0"
+  "peerDependencies": {
+    "three": ">=0.185.0 <0.186.0"
   },
   "devDependencies": {
-    "puppeteer-core": "^23.11.1",
-    "vite": "^6.0.0"
+    "lil-gui": "^0.20.0",
+    "puppeteer-core": "^25.8.0",
+    "three": "0.185.1",
+    "vite": "^7.3.6",
+    "vitest": "^3.2.4"
   }
 }

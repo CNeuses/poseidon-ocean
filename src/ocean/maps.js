@@ -254,5 +254,5 @@ export function createCascadeMaps(cascade,
   // the other the reverse. Ocean.evolve picks by frame parity, which makes the
   // read/write hazard impossible by construction.
   const assemble = [buildAssemble(0, 1), buildAssemble(1, 0)];
-  return { displacement, derivatives, assemble };
+  return { displacement, derivatives, history: hist, assemble };
 }

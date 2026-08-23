@@ -7,7 +7,7 @@
 
 <p align="center">
   <img alt="WebGPU" src="https://img.shields.io/badge/WebGPU-compute-005a9c">
-  <img alt="three.js" src="https://img.shields.io/badge/three.js-0.184-000000">
+  <img alt="three.js" src="https://img.shields.io/badge/three.js-0.185-000000">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
 
@@ -27,6 +27,42 @@ Safari 18+. If the page reports WebGPU as unavailable on a machine that should h
 `chrome://flags/#enable-unsafe-webgpu` is the usual culprit.
 
 `npm run build` / `npm run preview` produce and serve a static bundle.
+
+## Use as a dependency
+
+The maintained fork exposes a renderer-neutral package facade. It accepts the
+consumer's initialized Three.js WebGPU renderer and never creates a canvas,
+scene, camera, animation loop, GUI, or DOM listener.
+
+```js
+import {
+  createPoseidonSimulation,
+  createPoseidonSpectralSurfaceMaterial,
+  createPoseidonRadialGeometry,
+} from '@fantasai/poseidon-ocean';
+
+const simulation = await createPoseidonSimulation(renderer, { preset: 'ocean' });
+const surface = createPoseidonSpectralSurfaceMaterial(simulation, { upAxis: 'z' });
+const { geometry } = createPoseidonRadialGeometry();
+
+// In the consumer's frame loop:
+simulation.step(deltaSeconds);
+surface.shadingState.setTime(simulation.elapsedSeconds);
+
+// On unmount:
+geometry.dispose();
+surface.dispose();
+simulation.dispose();
+```
+
+`lake_calm` is the calibrated first-pass bounded-lake preset. Pass
+`createPoseidonShoreMask()` as the material's displacement mask when the lake
+geometry provides a `waterShoreDistance` attribute. The shader then reduces
+displacement and slopes to zero at the complete polygon border.
+
+The package declares Three `>=0.185.0 <0.186.0` as a peer dependency so the
+host owns exactly one Three renderer/runtime. Production consumers should pin
+an immutable Git SHA until tagged releases are introduced.
 
 ## Controls
 

@@ -4,7 +4,6 @@ import {
   texture, normalize, reflect, refract, dot, max, min, pow, mix, saturate, abs, smoothstep,
   length, fwidth, sqrt, exp, log2, PI,
 } from 'three/tsl';
-import { skyColor } from './sky.js';
 import { diffusionAttenuation } from './water.js';
 
 // --- look constants, local to this file -----------------------------------
@@ -902,7 +901,17 @@ const APRON_FOOT = 3.0;
 // dark water.
 const SCUD_OCC_MIN = 0.45;
 
-export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, detailTex }) {
+export function createOceanSurfaceMaterial(cascades, {
+  lengthScales,
+  shading,
+  detailTex,
+  upAxis = 'y',
+  displacementMask = float(1),
+  environmentColor,
+}) {
+  if (upAxis !== 'y' && upAxis !== 'z') {
+    throw new Error("Poseidon upAxis must be 'y' or 'z'.");
+  }
   const mat = new MeshBasicNodeMaterial();
   // Plane is authored in XY and remapped to XZ in positionNode, flipping the
   // winding — render both sides so it's visible from above too.
@@ -914,6 +923,11 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
   // offset here keeps every map lookup in true world space, so the wave field
   // stays put while the tile slides over it.
   const worldXZ = vec2(positionGeometry.x, positionGeometry.y).add(shading.originXZ);
+  const sampleEnvironment = environmentColor ?? ((direction) => {
+    const d = normalize(direction).toVar();
+    const height = smoothstep(float(-0.04), float(0.72), d.y);
+    return mix(vec3(shading.horizon), vec3(shading.zenith), height);
+  });
   // Resolve the sea palette once — see SEA. Each of these is used exactly once
   // downstream, so this is six mix() nodes in the graph and not a fetch, a
   // branch or a variant.
@@ -931,14 +945,23 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     const disp = vec3(0).toVar();
     cascades.forEach((c, i) => {
       const d = texture(c.displacement, worldXZ.div(lengthScales[i])).level(0).xyz;
-      disp.addAssign(i <= 1 ? d.mul(env) : d);
+      disp.addAssign((i <= 1 ? d.mul(env) : d).mul(displacementMask));
     });
+    if (upAxis === 'z') {
+      return vec3(positionGeometry.x.add(disp.x), positionGeometry.y.add(disp.z), disp.y);
+    }
     return vec3(positionGeometry.x.add(disp.x), disp.y, positionGeometry.y.add(disp.z));
   })();
 
   mat.colorNode = Fn(() => {
     const t = shading.time;
     const UP = vec3(0, 1, 0);
+    const surfacePosition = upAxis === 'z'
+      ? vec3(positionWorld.x, positionWorld.z, positionWorld.y)
+      : positionWorld;
+    const surfaceCamera = upAxis === 'z'
+      ? vec3(cameraPosition.x, cameraPosition.z, cameraPosition.y)
+      : cameraPosition;
 
     // --- band-limited normal ------------------------------------------------
     // fwidth of the *sampling* coordinate is the true world footprint of this
@@ -961,7 +984,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
       const s0 = texture(c.derivatives, worldXZ.div(lengthScales[i])).level(lod).toVar();
       const s = (i <= 1 ? s0.mul(envC) : s0).toVar();
       const w = saturate(float(lengthScales[i] / FEATURE_DIV).div(footprint)).toVar();
-      d.addAssign(s.mul(w));
+      d.addAssign(s.mul(w).mul(displacementMask));
       lostVar.addAssign(s.x.mul(s.x).add(s.y.mul(s.y)).mul(float(1).sub(w.mul(w))));
     });
     const slopeX = d.x.div(float(1).add(d.z));
@@ -1037,8 +1060,8 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
         .add(saturate(footprint.mul(ROUGH_FOOT_SCALE)).mul(ROUGH_FROM_FOOT)),
     ), float(ROUGH_MAX)).toVar();
 
-    const V = normalize(cameraPosition.sub(positionWorld)).toVar();
-    const viewDist = length(cameraPosition.sub(positionWorld)).toVar();
+    const V = normalize(surfaceCamera.sub(surfacePosition)).toVar();
+    const viewDist = length(surfaceCamera.sub(surfacePosition)).toVar();
     const NoV = saturate(dot(N, V)).toVar();
 
     const fres = fresnelDielectric(NoV, float(ETA_AW)).toVar();
@@ -1086,7 +1109,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     const azN = normalize(vec2(R.x, R.z).add(vec2(1e-4, 1e-4))).toVar();
     const elev = R.y.max(R.y.mul(-0.35).add(0.007)).toVar();
     const flat = sqrt(saturate(float(1).sub(elev.mul(elev)))).toVar();
-    const refl = skyColor(vec3(azN.x.mul(flat), elev, azN.y.mul(flat)), shading).toVar();
+    const refl = sampleEnvironment(vec3(azN.x.mul(flat), elev, azN.y.mul(flat))).toVar();
     // Below the line there is no sky to reflect, only more water, which is far
     // darker than the haze band — fade the sample down rather than pasting a
     // bright horizon on a downward-facing fold.
@@ -1158,7 +1181,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // x/(|x|+k) is monotonic and asymptotic, so however tall a crest gets the
     // colour keeps moving and never lands on a ceiling. Two crests of different
     // height are therefore two different colours, which is the whole point.
-    const hN = positionWorld.y.div(WAVE_SCALE).toVar();
+    const hN = surfacePosition.y.div(WAVE_SCALE).toVar();
     const lift = hN.div(abs(hN).add(HEIGHT_SOFT)).mul(0.5).add(0.5).toVar();
     const facing = saturate(dot(N, UP)).toVar();
 
@@ -1195,7 +1218,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // of its length trying to avoid. sqrt(x^2 + k^2) rounds the corner off over
     // a band of width k and costs one instruction.
     const softPos = (x, k) => x.add(sqrt(x.mul(x).add(k * k))).mul(0.5);
-    const chopS = positionWorld.y.sub(swellH).div(1.6).toVar();
+    const chopS = surfacePosition.y.sub(swellH).div(1.6).toVar();
     const chopP = softPos(chopS, 0.30).toVar();
     const chop = chopP.div(chopP.add(1.0)).toVar();
     // Thickness, as one number reused by every term that wants "thin water":
@@ -1751,7 +1774,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // dissolve and not a cut. Approximate by design: the sample is at the
     // undisplaced patch coordinate, so choppiness puts it up to a metre or two
     // off in XZ, which is nothing next to a wave that is swallowing the camera.
-    const submerged = saturate(camWaterY.sub(cameraPosition.y).mul(3).add(0.5)).toVar();
+    const submerged = saturate(camWaterY.sub(surfaceCamera.y).mul(3).add(0.5)).toVar();
     const under = saturate(dot(N, V).negate().mul(8)).mul(submerged).toVar();
     const Nb = N.negate().toVar(); // the sheet's normal as seen from below: into the air
     const ciUp = saturate(dot(Nb, V)).toVar();
@@ -1762,7 +1785,7 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // NaN, and NaN survives multiplication by the zero weight it is about to get,
     // so the epsilon is required rather than defensive.
     const up = refract(V.negate(), Nb, float(N_WATER)).toVar();
-    const window = skyColor(normalize(up.add(vec3(0, 1e-5, 0))), shading).toVar();
+    const window = sampleEnvironment(normalize(up.add(vec3(0, 1e-5, 0)))).toVar();
     // Inside the cone, sky; outside it, the mirrored water column. Fup does the
     // switch on its own and reaches exactly 1 at the rim, so the edge of the
     // window is drawn by the physics rather than by a threshold.
@@ -1783,12 +1806,12 @@ export function createOceanSurfaceMaterial(cascades, { lengthScales, shading, de
     // is the other half: additive energy that escapes the haze is exactly what
     // used to bloom the last twenty pixels of sea brighter than the sky.
     const hazeDir = normalize(vec3(V.x.negate(), float(HORIZON_LIFT), V.z.negate()));
-    const hazeCol = skyColor(hazeDir, shading).mul(SEA_SINK).toVar();
+    const hazeCol = sampleEnvironment(hazeDir).mul(SEA_SINK).toVar();
     // Beer-Lambert over true world distance, density falling off with altitude,
     // sampled at the ray's midpoint — the same model atmosphere.js applies to
     // everything else in the scene, so the water agrees with the spray and the
     // dome instead of drifting away from them.
-    const midY = positionWorld.y.add(cameraPosition.y).mul(0.5).max(0);
+    const midY = surfacePosition.y.add(surfaceCamera.y).mul(0.5).max(0);
     const tau = viewDist.mul(shading.hazeWater).mul(exp(midY.div(-HAZE_SCALE_H)));
     const ext = float(1).sub(exp(tau.negate())).toVar();
     // ...and the sea loses a little of its own value on top, so the band right

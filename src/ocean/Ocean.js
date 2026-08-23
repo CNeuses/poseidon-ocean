@@ -5,6 +5,7 @@ import { gaussianNoise } from './gaussianNoise.js';
 import { OceanCascade } from './OceanCascade.js';
 import { FFT } from './fft.js';
 import { createCascadeMaps } from './maps.js';
+import { releaseStorageAttribute } from './dispose.js';
 
 const FIELD_NAMES = ['DxDz', 'DyDxz', 'DyxDyz', 'DxxDzz'];
 
@@ -27,6 +28,9 @@ export class Ocean {
   constructor(renderer, params) {
     this.renderer = renderer;
     this.params = params;
+    this.disposed = false;
+    this.storageAttributes = [];
+    this.storageTextures = [];
     this.N = params.N;
     this.time = uniform(0);
 
@@ -38,6 +42,7 @@ export class Ocean {
     this.noise = attributeArray(this.N * this.N, 'vec2');
     this.noise.value.array.set(noiseData);
     this.noise.value.needsUpdate = true;
+    this.storageAttributes.push(this.noise);
 
     // Cascades with disjoint wavenumber bands. Hand-off wavenumber between
     // cascade i-1 and i is 2*pi / L_i * boundaryFactor.
@@ -60,11 +65,13 @@ export class Ocean {
     // scratch buffer so fields are mutually independent and can share a step's
     // compute pass. Group kernels by step index for batched, barriered dispatch.
     this.fft = new FFT(this.N);
+    this.storageAttributes.push(this.fft.butterfly);
     this.timeDepGroup = this.cascades.map((c) => c.kTimeDependent);
     const ffts = [];
     for (const c of this.cascades) {
       for (const name of FIELD_NAMES) {
         const scratch = attributeArray(this.N * this.N, 'vec2');
+        this.storageAttributes.push(scratch);
         ffts.push(this.fft.buildField(c[name], scratch));
       }
     }
@@ -101,13 +108,27 @@ export class Ocean {
       });
       c.displacement = maps.displacement;
       c.derivatives = maps.derivatives;
+      c.history = maps.history;
+      this.storageTextures.push(c.displacement, c.derivatives, ...c.history);
       this.assembleGroups[0].push(maps.assemble[0]);
       this.assembleGroups[1].push(maps.assemble[1]);
+    }
+    for (const cascade of this.cascades) {
+      this.storageAttributes.push(
+        cascade.h0k,
+        cascade.h0,
+        cascade.wavesData,
+        cascade.DxDz,
+        cascade.DyDxz,
+        cascade.DyxDyz,
+        cascade.DxxDzz,
+      );
     }
   }
 
   // Recompute h0 (once, and whenever wind/spectrum params change).
   async updateInitialSpectrum() {
+    if (this.disposed) throw new Error('Cannot rebuild a disposed Poseidon simulation.');
     applySpectrumParams(this.shared, this.params);
     for (const c of this.cascades) {
       await this.renderer.computeAsync(c.kInitial);
@@ -120,6 +141,7 @@ export class Ocean {
   // sees the ping-pong barrier between FFT steps; independent fields share a
   // step's pass.
   evolve(t, dt = 1 / 60) {
+    if (this.disposed) return;
     this.time.value = t;
     this.dt.value = dt;
     // Downwind unit vector in world XZ, in spectrum.js's own convention
@@ -138,7 +160,23 @@ export class Ocean {
 
   // Read back a cascade's packed h0 buffer for validation/diagnostics.
   async readbackH0(i = 0) {
+    if (this.disposed) throw new Error('Cannot read a disposed Poseidon simulation.');
     const ab = await this.renderer.getArrayBufferAsync(this.cascades[i].h0.value);
     return new Float32Array(ab);
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const texture of this.storageTextures) texture.dispose();
+    for (const attribute of this.storageAttributes) {
+      releaseStorageAttribute(this.renderer, attribute);
+    }
+    this.storageTextures.length = 0;
+    this.storageAttributes.length = 0;
+    this.cascades.length = 0;
+    this.stepGroups.length = 0;
+    this.assembleGroups[0].length = 0;
+    this.assembleGroups[1].length = 0;
   }
 }
