@@ -94,6 +94,7 @@ export function createPoseidonSpectralSurfaceMaterial(
     shading?: Record<string, unknown>;
     displacementMask?: Node;
     environmentColor?: (direction: Node) => Node;
+    surfaceElevation?: Node | number;
     detailTextureSize?: number;
   },
 ): PoseidonSurfaceResource;

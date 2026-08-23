@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createPoseidonRadialGeometry, createPoseidonShadingState } from './runtime.js';
+import { createOceanSurfaceMaterial } from './ocean/oceanSurfaceMaterial.js';
 
 describe('public runtime helpers', () => {
   it('creates a deterministic radial surface without scene ownership', () => {
@@ -15,5 +16,14 @@ describe('public runtime helpers', () => {
     expect(state.uniforms.sunDir.value).toMatchObject({ x: 0, y: 1, z: 0 });
     state.setOrigin(12, 34);
     expect(state.uniforms.originXZ.value).toMatchObject({ x: 12, y: 34 });
+  });
+
+  it('rejects unsupported coordinate frames before building a material', () => {
+    expect(() => createOceanSurfaceMaterial([], {
+      lengthScales: [],
+      shading: {},
+      detailTex: {},
+      upAxis: 'x',
+    })).toThrow("upAxis must be 'y' or 'z'");
   });
 });

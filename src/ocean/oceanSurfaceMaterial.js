@@ -908,6 +908,7 @@ export function createOceanSurfaceMaterial(cascades, {
   upAxis = 'y',
   displacementMask = float(1),
   environmentColor,
+  surfaceElevation = float(0),
 }) {
   if (upAxis !== 'y' && upAxis !== 'z') {
     throw new Error("Poseidon upAxis must be 'y' or 'z'.");
@@ -948,7 +949,11 @@ export function createOceanSurfaceMaterial(cascades, {
       disp.addAssign((i <= 1 ? d.mul(env) : d).mul(displacementMask));
     });
     if (upAxis === 'z') {
-      return vec3(positionGeometry.x.add(disp.x), positionGeometry.y.add(disp.z), disp.y);
+      return vec3(
+        positionGeometry.x.add(disp.x),
+        positionGeometry.y.add(disp.z),
+        positionGeometry.z.add(disp.y),
+      );
     }
     return vec3(positionGeometry.x.add(disp.x), disp.y, positionGeometry.y.add(disp.z));
   })();
@@ -1181,7 +1186,7 @@ export function createOceanSurfaceMaterial(cascades, {
     // x/(|x|+k) is monotonic and asymptotic, so however tall a crest gets the
     // colour keeps moving and never lands on a ceiling. Two crests of different
     // height are therefore two different colours, which is the whole point.
-    const hN = surfacePosition.y.div(WAVE_SCALE).toVar();
+    const hN = surfacePosition.y.sub(surfaceElevation).div(WAVE_SCALE).toVar();
     const lift = hN.div(abs(hN).add(HEIGHT_SOFT)).mul(0.5).add(0.5).toVar();
     const facing = saturate(dot(N, UP)).toVar();
 
@@ -1218,7 +1223,7 @@ export function createOceanSurfaceMaterial(cascades, {
     // of its length trying to avoid. sqrt(x^2 + k^2) rounds the corner off over
     // a band of width k and costs one instruction.
     const softPos = (x, k) => x.add(sqrt(x.mul(x).add(k * k))).mul(0.5);
-    const chopS = surfacePosition.y.sub(swellH).div(1.6).toVar();
+    const chopS = surfacePosition.y.sub(surfaceElevation).sub(swellH).div(1.6).toVar();
     const chopP = softPos(chopS, 0.30).toVar();
     const chop = chopP.div(chopP.add(1.0)).toVar();
     // Thickness, as one number reused by every term that wants "thin water":
@@ -1764,7 +1769,7 @@ export function createOceanSurfaceMaterial(cascades, {
     // sampling the water under the lens. Two taps at an address that is constant
     // across the whole frame — no CPU readback, no async latency, no uniform to
     // keep in sync. Cascade 2 is 24 cm of ripple and cannot decide this.
-    const camWaterY = float(0).toVar();
+    const camWaterY = float(surfaceElevation).toVar();
     const envO = ampEnvelope(detailTex, shading.originXZ).toVar();
     cascades.forEach((c, i) => {
       if (i > 1) return;

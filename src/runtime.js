@@ -161,6 +161,7 @@ export function createPoseidonSpectralSurfaceMaterial(simulation, options = {}) 
     upAxis: options.upAxis ?? shadingState.upAxis,
     displacementMask: options.displacementMask ?? float(1),
     environmentColor: options.environmentColor,
+    surfaceElevation: options.surfaceElevation ?? float(0),
   });
   let disposed = false;
   return {
