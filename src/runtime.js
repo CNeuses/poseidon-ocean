@@ -8,6 +8,33 @@ import { createRadialGrid } from './ocean/oceanGrid.js';
 import { createOceanSurfaceMaterial } from './ocean/oceanSurfaceMaterial.js';
 
 const STRUCTURAL_KEYS = new Set(['N', 'cascades', 'lengthScales', 'boundaryFactor']);
+const simulationLifetimes = new WeakMap();
+
+export function createDeferredResourceDisposer(dispose) {
+  let retainCount = 0;
+  let requested = false;
+  let released = false;
+  const releaseIfReady = () => {
+    if (!requested || retainCount !== 0 || released) return;
+    released = true;
+    dispose();
+  };
+  return {
+    get requested() { return requested; },
+    retain() {
+      if (requested) throw new Error('Cannot retain a disposed Poseidon simulation.');
+      retainCount++;
+    },
+    release() {
+      retainCount = Math.max(0, retainCount - 1);
+      releaseIfReady();
+    },
+    request() {
+      requested = true;
+      releaseIfReady();
+    },
+  };
+}
 
 function assertRenderer(renderer) {
   if (!renderer || typeof renderer.compute !== 'function' || typeof renderer.computeAsync !== 'function') {
@@ -34,20 +61,21 @@ export async function createPoseidonSimulation(renderer, options = {}) {
   let elapsed = 0;
   let updateVersion = 0;
   let rebuildQueue = Promise.resolve(false);
+  const lifetime = createDeferredResourceDisposer(() => ocean.dispose());
 
   const runtime = {
     get cascades() { return ocean.cascades; },
     get config() { return config; },
-    get disposed() { return ocean.disposed; },
+    get disposed() { return lifetime.requested || ocean.disposed; },
     get elapsedSeconds() { return elapsed; },
     step(deltaSeconds, timeScale = config.timeScale ?? 1) {
-      if (ocean.disposed) return;
+      if (lifetime.requested || ocean.disposed) return;
       const dt = Math.max(0, Math.min(Number(deltaSeconds) || 0, 0.1)) * timeScale;
       elapsed += dt;
       ocean.evolve(elapsed, dt);
     },
     update(patch) {
-      if (ocean.disposed) {
+      if (lifetime.requested || ocean.disposed) {
         return Promise.reject(new Error('Cannot update a disposed Poseidon simulation.'));
       }
       for (const key of STRUCTURAL_KEYS) {
@@ -63,9 +91,9 @@ export async function createPoseidonSimulation(renderer, options = {}) {
       ocean.foamSpread.value = config.foamSpread;
       const version = ++updateVersion;
       rebuildQueue = rebuildQueue.catch(() => false).then(async () => {
-        if (version !== updateVersion || ocean.disposed) return false;
+        if (version !== updateVersion || lifetime.requested || ocean.disposed) return false;
         await ocean.updateInitialSpectrum();
-        return version === updateVersion && !ocean.disposed;
+        return version === updateVersion && !lifetime.requested && !ocean.disposed;
       });
       return rebuildQueue;
     },
@@ -74,9 +102,10 @@ export async function createPoseidonSimulation(renderer, options = {}) {
     },
     dispose() {
       updateVersion++;
-      ocean.dispose();
+      lifetime.request();
     },
   };
+  simulationLifetimes.set(runtime, lifetime);
   return runtime;
 }
 
@@ -142,6 +171,9 @@ export function createPoseidonSpectralSurfaceMaterial(simulation, options = {}) 
   if (!simulation || simulation.disposed) {
     throw new Error('Poseidon surface needs a live simulation.');
   }
+  const lifetime = simulationLifetimes.get(simulation);
+  if (!lifetime) throw new Error('Poseidon surface needs a package-owned simulation.');
+  lifetime.retain();
   const shadingState = options.shadingState ?? createPoseidonShadingState({
     ...options.shading,
     upAxis: options.upAxis ?? 'y',
@@ -153,18 +185,26 @@ export function createPoseidonSpectralSurfaceMaterial(simulation, options = {}) 
     detailStrength: simulation.config.detailStrength,
     palette: simulation.config.palette,
   });
-  const detailTexture = makeDetailTexture(options.detailTextureSize ?? 512);
-  const material = createOceanSurfaceMaterial(simulation.cascades, {
-    lengthScales: simulation.config.lengthScales,
-    shading: shadingState.uniforms,
-    detailTex: detailTexture,
-    upAxis: options.upAxis ?? shadingState.upAxis,
-    displacementMask: options.displacementMask ?? float(1),
-    opacity: options.opacity,
-    shoreFoamMask: options.shoreFoamMask,
-    environmentColor: options.environmentColor,
-    surfaceElevation: options.surfaceElevation ?? float(0),
-  });
+  let detailTexture;
+  let material;
+  try {
+    detailTexture = makeDetailTexture(options.detailTextureSize ?? 512);
+    material = createOceanSurfaceMaterial(simulation.cascades.slice(), {
+      lengthScales: simulation.config.lengthScales,
+      shading: shadingState.uniforms,
+      detailTex: detailTexture,
+      upAxis: options.upAxis ?? shadingState.upAxis,
+      displacementMask: options.displacementMask ?? float(1),
+      opacity: options.opacity,
+      shoreFoamMask: options.shoreFoamMask,
+      environmentColor: options.environmentColor,
+      surfaceElevation: options.surfaceElevation ?? float(0),
+    });
+  } catch (error) {
+    detailTexture?.dispose();
+    lifetime.release();
+    throw error;
+  }
   let disposed = false;
   return {
     material,
@@ -174,6 +214,7 @@ export function createPoseidonSpectralSurfaceMaterial(simulation, options = {}) 
       disposed = true;
       material.dispose();
       detailTexture.dispose();
+      lifetime.release();
     },
   };
 }

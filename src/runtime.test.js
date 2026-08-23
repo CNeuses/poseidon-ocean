@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   createPoseidonDepthOpacity,
+  createDeferredResourceDisposer,
   createPoseidonRadialGeometry,
   createPoseidonShadingState,
   createPoseidonShoreFoamMask,
@@ -35,5 +36,21 @@ describe('public runtime helpers', () => {
   it('exposes composable depth-opacity and shoreline-foam nodes', () => {
     expect(createPoseidonDepthOpacity().isNode).toBe(true);
     expect(createPoseidonShoreFoamMask().isNode).toBe(true);
+  });
+
+  it('defers simulation resource release until every surface is gone', () => {
+    let releases = 0;
+    const lifetime = createDeferredResourceDisposer(() => releases++);
+    lifetime.retain();
+    lifetime.retain();
+    lifetime.request();
+    expect(lifetime.requested).toBe(true);
+    expect(releases).toBe(0);
+    lifetime.release();
+    expect(releases).toBe(0);
+    lifetime.release();
+    expect(releases).toBe(1);
+    lifetime.request();
+    expect(releases).toBe(1);
   });
 });
