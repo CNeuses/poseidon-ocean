@@ -93,6 +93,8 @@ export function createPoseidonSpectralSurfaceMaterial(
     shadingState?: PoseidonShadingState;
     shading?: Record<string, unknown>;
     displacementMask?: Node;
+    opacity?: Node;
+    shoreFoamMask?: Node;
     environmentColor?: (direction: Node) => Node;
     surfaceElevation?: Node | number;
     detailTextureSize?: number;
@@ -100,6 +102,15 @@ export function createPoseidonSpectralSurfaceMaterial(
 ): PoseidonSurfaceResource;
 export function createPoseidonShoreMask(options?: {
   attributeName?: string;
+  fadeDistanceMeters?: number;
+}): Node;
+export function createPoseidonDepthOpacity(options?: {
+  depthAttributeName?: string;
+  clarityAttributeName?: string;
+}): Node;
+export function createPoseidonShoreFoamMask(options?: {
+  distanceAttributeName?: string;
+  strengthAttributeName?: string;
   fadeDistanceMeters?: number;
 }): Node;
 export function createPoseidonRadialGeometry(options?: {

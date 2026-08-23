@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { createPoseidonRadialGeometry, createPoseidonShadingState } from './runtime.js';
+import {
+  createPoseidonDepthOpacity,
+  createPoseidonRadialGeometry,
+  createPoseidonShadingState,
+  createPoseidonShoreFoamMask,
+} from './runtime.js';
 import { createOceanSurfaceMaterial } from './ocean/oceanSurfaceMaterial.js';
 
 describe('public runtime helpers', () => {
@@ -25,5 +30,10 @@ describe('public runtime helpers', () => {
       detailTex: {},
       upAxis: 'x',
     })).toThrow("upAxis must be 'y' or 'z'");
+  });
+
+  it('exposes composable depth-opacity and shoreline-foam nodes', () => {
+    expect(createPoseidonDepthOpacity().isNode).toBe(true);
+    expect(createPoseidonShoreFoamMask().isNode).toBe(true);
   });
 });

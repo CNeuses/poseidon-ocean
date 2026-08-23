@@ -907,6 +907,8 @@ export function createOceanSurfaceMaterial(cascades, {
   detailTex,
   upAxis = 'y',
   displacementMask = float(1),
+  opacity,
+  shoreFoamMask,
   environmentColor,
   surfaceElevation = float(0),
 }) {
@@ -1835,8 +1837,23 @@ export function createOceanSurfaceMaterial(cascades, {
     // this is. Nothing beyond a few metres survives — which is correct, and is
     // also why this needs no volumetric anything.
     const seaExt = exp(muWater.mul(viewDist).negate()).toVar();
-    return mix(aerial, mix(deepBody.mul(0.35), surface, seaExt), submerged);
+    const depthComposited = mix(
+      aerial,
+      mix(deepBody.mul(0.35), surface, seaExt),
+      submerged,
+    );
+    return shoreFoamMask
+      ? mix(depthComposited, vec3(shading.foamColor).mul(0.9), saturate(shoreFoamMask))
+      : depthComposited;
   })();
+
+  if (opacity) {
+    mat.transparent = true;
+    mat.depthWrite = false;
+    mat.opacityNode = shoreFoamMask
+      ? max(opacity, saturate(shoreFoamMask).mul(0.94))
+      : opacity;
+  }
 
   return mat;
 }

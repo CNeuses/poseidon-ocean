@@ -1,5 +1,5 @@
 import { Color, Vector2, Vector3 } from 'three/webgpu';
-import { attribute, float, smoothstep, uniform } from 'three/tsl';
+import { attribute, float, mix, positionGeometry, sin, smoothstep, uniform } from 'three/tsl';
 import { createPoseidonConfig, patchPoseidonConfig } from './config.js';
 import { makeDetailTexture } from './ocean/detailTexture.js';
 import { validateFFT } from './ocean/fft.js';
@@ -160,6 +160,8 @@ export function createPoseidonSpectralSurfaceMaterial(simulation, options = {}) 
     detailTex: detailTexture,
     upAxis: options.upAxis ?? shadingState.upAxis,
     displacementMask: options.displacementMask ?? float(1),
+    opacity: options.opacity,
+    shoreFoamMask: options.shoreFoamMask,
     environmentColor: options.environmentColor,
     surfaceElevation: options.surfaceElevation ?? float(0),
   });
@@ -179,6 +181,32 @@ export function createPoseidonSpectralSurfaceMaterial(simulation, options = {}) 
 export function createPoseidonShoreMask(options = {}) {
   const shoreDistance = attribute(options.attributeName ?? 'waterShoreDistance', 'float');
   return smoothstep(float(0), float(options.fadeDistanceMeters ?? 3), shoreDistance);
+}
+
+/** Blend the spectral surface with the scene according to authored water depth. */
+export function createPoseidonDepthOpacity(options = {}) {
+  const depth = attribute(options.depthAttributeName ?? 'waterDepth', 'float').max(0);
+  const clarity = attribute(options.clarityAttributeName ?? 'waterClarity', 'float').clamp(0, 1);
+  const shallowOpacity = mix(float(0.56), float(0.16), clarity);
+  const deepOpacity = mix(float(0.96), float(0.76), clarity);
+  const extinctionDepth = mix(float(1.4), float(8), clarity);
+  const depthBlend = smoothstep(float(0.08), extinctionDepth, depth);
+  return mix(shallowOpacity, deepOpacity, depthBlend).clamp(0, 1);
+}
+
+/** Produce a broken-up foam band from the same shore-distance contract as displacement. */
+export function createPoseidonShoreFoamMask(options = {}) {
+  const distance = attribute(options.distanceAttributeName ?? 'waterShoreDistance', 'float');
+  const strength = attribute(options.strengthAttributeName ?? 'waterFoamStrength', 'float')
+    .clamp(0, 1);
+  const fadeDistance = float(options.fadeDistanceMeters ?? 1.8);
+  const band = float(1).sub(smoothstep(float(0.04), fadeDistance, distance));
+  const broad = sin(positionGeometry.x.mul(1.37).add(positionGeometry.y.mul(1.91)))
+    .mul(0.5).add(0.5);
+  const lace = sin(positionGeometry.x.mul(4.13).sub(positionGeometry.y.mul(2.77)))
+    .mul(0.5).add(0.5);
+  return band.mul(mix(float(0.48), float(1), broad.mul(0.7).add(lace.mul(0.3))))
+    .mul(strength).clamp(0, 1);
 }
 
 export function createPoseidonRadialGeometry(options = {}) {
